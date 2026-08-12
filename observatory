@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import webbrowser
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / ".data"
+RUNTIME_FILE = DATA_DIR / "runtime.json"
+LOG_FILE = DATA_DIR / "server.log"
+DEFAULT_CANOPY_ROOT = (ROOT.parent / "Canopy").resolve()
+
+
+def run(
+    command: list[str],
+    *,
+    timeout: int = 900,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=timeout,
+        env=env,
+    )
+
+
+def venv_python() -> Path:
+    return ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def venv_pip() -> Path:
+    return ROOT / ".venv" / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
+
+
+def resolve_canopy_root(raw: str) -> Path:
+    return Path(raw or os.getenv("CANOPY_ROOT", "") or DEFAULT_CANOPY_ROOT).expanduser().resolve()
+
+
+def discover_node() -> tuple[Path, str]:
+    candidates: list[Path] = []
+    for raw in (os.getenv("NVM_BIN", ""), os.getenv("VOLTA_HOME", "")):
+        if raw:
+            candidates.append(Path(raw).expanduser() / ("bin/node" if raw == os.getenv("VOLTA_HOME", "") else "node"))
+    path_node = shutil.which("node")
+    if path_node:
+        candidates.append(Path(path_node))
+    candidates.extend(sorted((Path.home() / ".nvm" / "versions" / "node").glob("*/bin/node")))
+    candidates.extend([Path("/opt/homebrew/bin/node"), Path("/usr/local/bin/node")])
+
+    discovered: list[tuple[tuple[int, int, int], Path, str]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        result = run([str(resolved), "--version"])
+        if result.returncode:
+            continue
+        version = result.stdout.strip()
+        try:
+            parts = version.lstrip("v").split(".")
+            parsed = (int(parts[0]), int(parts[1]), int(parts[2]))
+        except (IndexError, ValueError):
+            continue
+        discovered.append((parsed, resolved, version))
+    if not discovered:
+        raise RuntimeError("Node.js is required to build Canopy Living System")
+    _, node, version = max(discovered, key=lambda item: item[0])
+    return node, version
+
+
+def node_tooling() -> tuple[list[str], dict[str, str]]:
+    node, version_text = discover_node()
+    npm_cli = node.parent.parent / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    npm_raw = str(node.parent / ("npm.cmd" if os.name == "nt" else "npm"))
+    if not Path(npm_raw).is_file():
+        npm_raw = shutil.which("npm") or ""
+    if not npm_cli.is_file() and not npm_raw:
+        raise RuntimeError(f"npm was not found for {node}")
+    command = [str(node), str(npm_cli)] if npm_cli.is_file() else [npm_raw]
+    env = {
+        **os.environ,
+        "PATH": str(node.parent) + os.pathsep + os.environ.get("PATH", ""),
+    }
+    try:
+        major = int(version_text.lstrip("v").split(".", 1)[0])
+    except ValueError as exc:
+        raise RuntimeError(f"Could not parse Node.js version: {version_text}") from exc
+    if major < 20:
+        raise RuntimeError(f"Node.js 20 or newer is required; found {version_text}")
+    return command, env
+
+
+def require_success(result: subprocess.CompletedProcess[str], label: str) -> None:
+    if result.returncode == 0:
+        return
+    detail = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+    raise RuntimeError(f"{label} failed: {detail}")
+
+
+def install(canopy_root: Path) -> None:
+    if not (canopy_root / "canopy").is_file():
+        raise RuntimeError(f"Canopy CLI not found: {canopy_root / 'canopy'}")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not venv_python().is_file():
+        require_success(run([sys.executable, "-m", "venv", str(ROOT / ".venv")]), "venv")
+    require_success(
+        run([str(venv_pip()), "install", "--disable-pip-version-check", "-r", "requirements.txt"]),
+        "Python dependency installation",
+    )
+    npm, node_env = node_tooling()
+    require_success(run([*npm, "install"], env=node_env), "frontend dependency installation")
+    build_frontend(npm=npm, node_env=node_env)
+    env = {**os.environ, "CANOPY_ROOT": str(canopy_root)}
+    result = subprocess.run(
+        [str(venv_python()), "-c", "from backend.app.main import initialize_runtime; initialize_runtime()"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    require_success(result, "database initialization")
+
+
+def build_frontend(
+    *,
+    npm: list[str] | None = None,
+    node_env: dict[str, str] | None = None,
+) -> None:
+    if npm is None or node_env is None:
+        npm, node_env = node_tooling()
+    require_success(run([*npm, "run", "build"], env=node_env), "frontend build")
+
+
+def load_runtime() -> dict[str, object]:
+    if not RUNTIME_FILE.is_file():
+        return {}
+    try:
+        payload = json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def endpoint_healthy(port: int) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
+        return False
+
+
+def running_runtime() -> dict[str, object]:
+    runtime = load_runtime()
+    try:
+        pid = int(runtime.get("pid", 0))
+        port = int(runtime.get("port", 0))
+    except (TypeError, ValueError):
+        return {}
+    return runtime if process_alive(pid) and endpoint_healthy(port) else {}
+
+
+def available_port(preferred: int) -> int:
+    for port in range(preferred, preferred + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # Match uvicorn's reusable listener behavior so a clean restart
+            # returns to the requested port instead of drifting to 8766.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("No available localhost port found")
+
+
+def start(canopy_root: Path, *, preferred_port: int, open_browser: bool) -> str:
+    runtime = running_runtime()
+    if runtime:
+        url = f"http://127.0.0.1:{int(runtime['port'])}"
+        if open_browser:
+            webbrowser.open(url)
+        return url
+
+    if not venv_python().is_file() or not (ROOT / "dist" / "index.html").is_file():
+        install(canopy_root)
+
+    port = available_port(preferred_port)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log_handle = LOG_FILE.open("a", encoding="utf-8")
+    env = {
+        **os.environ,
+        "CANOPY_ROOT": str(canopy_root),
+        "CANOPY_OBSERVATORY_DATA_DIR": str(DATA_DIR),
+    }
+    process = subprocess.Popen(
+        [
+            str(venv_python()),
+            "-m",
+            "uvicorn",
+            "backend.app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+        ],
+        cwd=ROOT,
+        env=env,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(80):
+        if process.poll() is not None:
+            raise RuntimeError(f"Living System exited during startup; inspect {LOG_FILE}")
+        if endpoint_healthy(port):
+            break
+        time.sleep(0.15)
+    else:
+        process.terminate()
+        raise RuntimeError(f"Living System did not become healthy; inspect {LOG_FILE}")
+
+    RUNTIME_FILE.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": process.pid,
+                "port": port,
+                "url": url,
+                "canopy_root": str(canopy_root),
+                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if open_browser:
+        webbrowser.open(url)
+    return url
+
+
+def stop() -> bool:
+    runtime = load_runtime()
+    try:
+        pid = int(runtime.get("pid", 0))
+    except (TypeError, ValueError):
+        pid = 0
+    if not process_alive(pid):
+        RUNTIME_FILE.unlink(missing_ok=True)
+        return False
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(40):
+        if not process_alive(pid):
+            break
+        time.sleep(0.1)
+    RUNTIME_FILE.unlink(missing_ok=True)
+    return True
+
+
+def doctor(canopy_root: Path) -> int:
+    try:
+        selected_node, selected_node_version = discover_node()
+        node_status = "PASS" if int(selected_node_version.lstrip("v").split(".", 1)[0]) >= 20 else "FAIL"
+        node_detail = f"{selected_node_version} ({selected_node})"
+    except (RuntimeError, ValueError) as exc:
+        node_status = "FAIL"
+        node_detail = str(exc)
+    checks = [
+        ("PASS" if (canopy_root / "canopy").is_file() else "FAIL", "Canopy", str(canopy_root)),
+        ("PASS" if sys.version_info >= (3, 11) else "FAIL", "Python", sys.version.split()[0]),
+        (node_status, "Node", node_detail),
+        ("PASS" if shutil.which("npm") else "FAIL", "npm", shutil.which("npm") or "missing"),
+        ("PASS" if venv_python().is_file() else "INFO", "Python environment", str(ROOT / ".venv")),
+        ("PASS" if (ROOT / "dist" / "index.html").is_file() else "INFO", "Frontend build", str(ROOT / "dist")),
+        ("PASS" if running_runtime() else "INFO", "Local service", str(load_runtime().get("url", "stopped"))),
+    ]
+    for status, name, detail in checks:
+        print(f"[{status}] {name}: {detail}")
+    return 1 if any(status == "FAIL" for status, _, _ in checks) else 0
+
+
+def update(canopy_root: Path) -> None:
+    stop()
+    if (ROOT / ".git").is_dir():
+        status = run(["git", "status", "--porcelain"])
+        require_success(status, "git status")
+        if status.stdout.strip():
+            raise RuntimeError("Living System has local changes; update stopped without modifying them")
+        require_success(run(["git", "pull", "--ff-only"]), "git update")
+    install(canopy_root)
+
+
+def uninstall() -> None:
+    stop()
+    for path in (ROOT / ".venv", ROOT / "node_modules", ROOT / "dist", DATA_DIR):
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Canopy Living System lifecycle")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    for command in ("install", "doctor", "update"):
+        item = subparsers.add_parser(command)
+        item.add_argument("--canopy-root", default="")
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("--canopy-root", default="")
+    start_parser.add_argument("--port", type=int, default=8765)
+    start_parser.add_argument("--no-open", action="store_true")
+    subparsers.add_parser("stop")
+    subparsers.add_parser("uninstall")
+    subparsers.add_parser("build")
+    subparsers.add_parser("visual-test")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    canopy_root = resolve_canopy_root(getattr(args, "canopy_root", ""))
+    try:
+        if args.command == "install":
+            install(canopy_root)
+            print("Canopy Living System installed")
+        elif args.command == "doctor":
+            return doctor(canopy_root)
+        elif args.command == "start":
+            print(start(canopy_root, preferred_port=args.port, open_browser=not args.no_open))
+        elif args.command == "stop":
+            print("Canopy Living System stopped" if stop() else "Canopy Living System is not running")
+        elif args.command == "update":
+            update(canopy_root)
+            print("Canopy Living System updated")
+        elif args.command == "uninstall":
+            uninstall()
+            print("Canopy Living System generated runtime removed")
+        elif args.command == "build":
+            build_frontend()
+            print("Canopy Living System frontend built")
+        elif args.command == "visual-test":
+            npm, node_env = node_tooling()
+            result = run([*npm, "run", "visual:test"], env=node_env)
+            require_success(result, "visual verification")
+            if result.stdout.strip():
+                print(result.stdout.strip())
+            print("Canopy Living System visual verification passed")
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"Canopy Living System error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

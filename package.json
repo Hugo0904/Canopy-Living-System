@@ -1,0 +1,31 @@
+{
+  "name": "canopy-observatory",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "tsc -b --pretty false",
+    "preview": "vite preview --host 127.0.0.1",
+    "visual:test": "node scripts/visual_check.mjs"
+  },
+  "dependencies": {
+    "@react-three/drei": "^10.7.4",
+    "@react-three/fiber": "^9.3.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "three": "^0.179.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@types/three": "^0.179.0",
+    "@vitejs/plugin-react": "^5.0.2",
+    "playwright-core": "^1.55.0",
+    "pngjs": "^7.0.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}
