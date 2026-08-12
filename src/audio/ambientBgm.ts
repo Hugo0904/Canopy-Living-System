@@ -1,4 +1,13 @@
-export type AmbientTrackId = "greenhouse" | "meadow" | "forest" | "clear-sky" | "sunlit-piano";
+export type AmbientTrackId =
+  | "greenhouse"
+  | "meadow"
+  | "forest"
+  | "clear-sky"
+  | "sunlit-piano"
+  | "sacred-grove"
+  | "resonant-chimes"
+  | "shrine-ritual"
+  | "ancient-temple";
 
 export interface AmbientTrackInfo {
   id: AmbientTrackId;
@@ -55,6 +64,42 @@ export const AMBIENT_TRACKS: Record<AmbientTrackId, AmbientTrackInfo> = {
     license: "CC0",
     licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
     sourceUrl: "https://opengameart.org/node/182244",
+  },
+  "sacred-grove": {
+    id: "sacred-grove",
+    url: "/assets/audio/tracks/sacred-grove-bells.mp3?v=2",
+    title: "Sacred Grove Bells",
+    artist: "yd · Canopy arrangement",
+    license: "CC0 source · original bell arrangement",
+    licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
+    sourceUrl: "https://opengameart.org/content/shrine",
+  },
+  "resonant-chimes": {
+    id: "resonant-chimes",
+    url: "/assets/audio/tracks/resonant-chimes.mp3",
+    title: "Wind Chimes Loop 2",
+    artist: "pmiller",
+    license: "CC0",
+    licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
+    sourceUrl: "https://opengameart.org/content/wind-chimes",
+  },
+  "shrine-ritual": {
+    id: "shrine-ritual",
+    url: "/assets/audio/tracks/shrine-ritual.mp3",
+    title: "Ritual",
+    artist: "brainiac256",
+    license: "CC BY 3.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/3.0/",
+    sourceUrl: "https://opengameart.org/content/ritual",
+  },
+  "ancient-temple": {
+    id: "ancient-temple",
+    url: "/assets/audio/tracks/ancient-temple.mp3",
+    title: "Ancient Temple",
+    artist: "Alexandr Zhelanov",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://opengameart.org/content/ancient-temple",
   },
 };
 

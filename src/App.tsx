@@ -84,7 +84,17 @@ const MODULE_ICONS: Record<string, typeof BrainCircuit> = {
 
 const LOCALES: Locale[] = ["zh-TW", "zh-CN", "en"];
 const BACKGROUNDS: BackgroundMode[] = ["detailed", "simple", "none"];
-const MUSIC_TRACKS: AmbientTrackId[] = ["greenhouse", "meadow", "forest", "clear-sky", "sunlit-piano"];
+const MUSIC_TRACKS: AmbientTrackId[] = [
+  "sacred-grove",
+  "resonant-chimes",
+  "shrine-ritual",
+  "ancient-temple",
+  "greenhouse",
+  "meadow",
+  "forest",
+  "clear-sky",
+  "sunlit-piano",
+];
 
 function deriveStructureNavigationState(
   nodes: StructureNode[],

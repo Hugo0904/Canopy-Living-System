@@ -86,7 +86,28 @@ async function prepare(page, { locale = "zh-TW", background = "detailed", lifeSt
     const body = (await page.locator("body").innerText().catch(() => "")).slice(0, 1200);
     throw new Error(`3D canvas did not become visible. Body: ${body}`, { cause: error });
   }
-  await page.locator(".scene-label").first().waitFor({ state: "visible", timeout: 60000 });
+  // The host-shell label can legitimately be occluded by a foreground living
+  // unit at some camera angles. Wait for any projected label, not whichever
+  // label happens to be first in DOM order.
+  try {
+    await page.locator(".scene-label:visible").first().waitFor({ state: "visible", timeout: 60000 });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      body: document.body.innerText.slice(0, 900),
+      visibility: document.visibilityState,
+      labels: [...document.querySelectorAll(".scene-label")].slice(0, 4).map((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return { text: element.textContent, rect: rect.toJSON(), display: style.display, visibility: style.visibility, opacity: style.opacity };
+      }),
+      canvases: [...document.querySelectorAll("canvas")].map((canvas) => ({
+        width: canvas.width,
+        height: canvas.height,
+        rect: canvas.getBoundingClientRect().toJSON(),
+      })),
+    }));
+    throw new Error(`3D labels did not project. ${JSON.stringify(diagnostic)}`, { cause: error });
+  }
   await page.waitForTimeout(1800);
 }
 
@@ -153,13 +174,32 @@ async function verifyControls(page) {
   await volume.fill("1");
   if ((await volume.inputValue()) !== "1") failures.push("BGM volume control did not reach 100%");
   if ((await page.evaluate(() => localStorage.getItem("canopy.music.volume"))) !== "1") failures.push("BGM volume preference was not persisted");
-  await pointerClick(page, page.getByRole("button", { name: "遺跡旅程", exact: true }));
-  await page.waitForFunction(() => localStorage.getItem("canopy.music") === "meadow", null, { timeout: 10000 });
-  const audioAssetReady = await page.evaluate(async () => {
-    const response = await fetch("/assets/audio/tracks/celtic-impulse.mp3", { method: "HEAD" });
-    return response.ok && response.headers.get("content-type") === "audio/mpeg";
+  const musicOptionCount = await page.locator("[data-testid='music-settings'] button").count();
+  if (musicOptionCount !== 9) failures.push(`expected 9 BGM choices, got ${musicOptionCount}`);
+  await pointerClick(page, page.getByRole("button", { name: "神木之鈴", exact: true }));
+  await page.waitForFunction(() => localStorage.getItem("canopy.music") === "sacred-grove", null, { timeout: 10000 });
+  await page.waitForFunction(() => {
+    const audio = document.querySelector("audio[data-canopy-bgm='sacred-grove']");
+    return audio instanceof HTMLAudioElement && audio.readyState >= HTMLMediaElement.HAVE_METADATA;
+  }, null, { timeout: 15000 });
+  const sacredCredit = await page.locator(".music-credit").innerText();
+  if (!sacredCredit.includes("Sacred Grove Bells") || !sacredCredit.includes("yd")) {
+    failures.push("Sacred Grove Bells attribution is not visible");
+  }
+  const audioAssetsReady = await page.evaluate(async () => {
+    const paths = [
+      "/assets/audio/tracks/sacred-grove-bells.mp3",
+      "/assets/audio/tracks/resonant-chimes.mp3",
+      "/assets/audio/tracks/shrine-ritual.mp3",
+      "/assets/audio/tracks/ancient-temple.mp3",
+    ];
+    return Promise.all(paths.map(async (path) => {
+      const response = await fetch(path, { method: "HEAD" });
+      return { path, ok: response.ok, contentType: response.headers.get("content-type") };
+    }));
   });
-  if (!audioAssetReady) failures.push("selected BGM asset is not available");
+  const unavailableAudio = audioAssetsReady.filter((asset) => !asset.ok || asset.contentType !== "audio/mpeg");
+  if (unavailableAudio.length) failures.push(`new BGM assets unavailable: ${unavailableAudio.map((asset) => asset.path).join(", ")}`);
   await clickControl(page.getByRole("button", { name: "關閉設定" }));
 
   await pointerClick(page, page.getByRole("button", { name: "關閉背景音樂" }));
@@ -170,7 +210,40 @@ async function verifyControls(page) {
   await clickControl(page.getByRole("button", { name: "進入根系記憶" }).first());
   await page.getByText("讓新工具延續既有習慣", { exact: true }).first().waitFor({ timeout: 10000 });
   await page.getByText("seed.capability.map_new_tools_to_habits", { exact: true }).first().waitFor({ timeout: 10000 });
-  return { connectionCount, flowLabels, detailFlows, failures };
+  return { connectionCount, flowLabels, detailFlows, musicOptionCount, audioAssetsReady, failures };
+}
+
+async function verifyNarrowMusicSettings(page) {
+  const failures = [];
+  await page.setViewportSize({ width: 390, height: 844 });
+  await prepare(page, { background: "simple" });
+  await pointerClick(page, page.getByRole("button", { name: "設定" }));
+  const panel = page.locator(".settings-panel");
+  await panel.waitFor({ state: "visible", timeout: 10000 });
+  const lastTrack = panel.getByRole("button", { name: "晨光鋼琴", exact: true });
+  await lastTrack.scrollIntoViewIfNeeded();
+  const panelBounds = await panel.boundingBox();
+  const lastTrackBounds = await lastTrack.boundingBox();
+  const panelMetrics = await panel.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  if (panelMetrics.scrollWidth > panelMetrics.clientWidth + 1) failures.push("narrow music settings scroll horizontally");
+  if (
+    !panelBounds
+    || !lastTrackBounds
+    || lastTrackBounds.x < 0
+    || lastTrackBounds.x + lastTrackBounds.width > 390
+    || lastTrackBounds.y < panelBounds.y
+    || lastTrackBounds.y + lastTrackBounds.height > panelBounds.y + panelBounds.height
+  ) {
+    failures.push("last BGM choice is not reachable inside narrow settings");
+  }
+  const resonantChimes = panel.getByRole("button", { name: "神鈴回響", exact: true });
+  await resonantChimes.scrollIntoViewIfNeeded();
+  await pointerClick(page, resonantChimes);
+  await page.waitForFunction(() => localStorage.getItem("canopy.music") === "resonant-chimes", null, { timeout: 10000 });
+  return { panelBounds, lastTrackBounds, panelMetrics, failures };
 }
 
 async function verifyPickingAndNavigation(page) {
@@ -308,6 +381,19 @@ async function verifyLifeStream(page) {
   await prepare(page, { lifeStream: "open" });
   const panel = page.locator(".life-stream-panel");
   await panel.waitFor({ state: "visible", timeout: 15000 });
+  await clickControl(panel.getByRole("button", { name: "收合生命歷程", exact: true }));
+  const desktopPeek = page.locator(".life-stream-peek");
+  await desktopPeek.waitFor({ state: "visible", timeout: 10000 });
+  await page.waitForTimeout(260);
+  const desktopPeekBounds = await desktopPeek.boundingBox();
+  if (!desktopPeekBounds || desktopPeekBounds.width > 50 || desktopPeekBounds.height <= desktopPeekBounds.width) {
+    failures.push("desktop life history did not collapse into a vertical edge tab");
+  }
+  if (desktopPeekBounds && desktopPeekBounds.x + desktopPeekBounds.width > 1440) {
+    failures.push("desktop life history edge tab escapes the viewport");
+  }
+  await clickControl(desktopPeek);
+  await panel.waitFor({ state: "visible", timeout: 10000 });
   const eventCount = await panel.locator(".life-event").count();
   const learningCount = await panel.locator(".life-learning").count();
   const privacyVisible = await panel.getByText("不保存原始 prompt", { exact: false }).isVisible();
@@ -315,17 +401,21 @@ async function verifyLifeStream(page) {
   const apiContract = await page.evaluate(async () => {
     const response = await fetch("/api/life-events?limit=80");
     const payload = await response.json();
-    const serialized = JSON.stringify(payload.events || []);
+    const events = payload.events || [];
+    const serialized = JSON.stringify(events);
     return {
       ok: response.ok,
       total: payload.stats?.total || 0,
       retentionDays: payload.retention_days,
       syncStatus: payload.sync?.status || "",
+      visibleLearningCount: events.slice(0, 36).filter((event) => String(event.learning || "").trim()).length,
       containsRawToolInput: serialized.includes("tool_input") || serialized.includes("tool_response"),
     };
   });
   if (!eventCount) failures.push("life history contains no visible activity events");
-  if (!learningCount) failures.push("life history exposes no learning evidence");
+  if (learningCount !== apiContract.visibleLearningCount) {
+    failures.push(`life history learning evidence mismatch: API ${apiContract.visibleLearningCount}, UI ${learningCount}`);
+  }
   if (!privacyVisible) failures.push("life history privacy boundary is not visible");
   if (!retentionCopy.includes("60 天")) failures.push(`life history retention copy was ${retentionCopy}`);
   if (!apiContract.ok || !apiContract.total) failures.push("life event SQLite projection is empty or unavailable");
@@ -342,12 +432,22 @@ async function verifyLifeStream(page) {
     failures.push("life event details do not explain assistance or verification");
   }
   const detail = page.locator(".detail-panel");
-  if (await detail.count()) {
-    const panelBounds = await panel.boundingBox();
-    const detailBounds = await detail.boundingBox();
-    if (panelBounds && detailBounds && detailBounds.x + detailBounds.width > panelBounds.x) {
-      failures.push("desktop life history overlaps selected-unit details");
-    }
+  const desktopPeekWithDetail = page.locator(".life-stream-peek");
+  await clickControl(panel.getByRole("button", { name: "收合生命歷程", exact: true }));
+  await desktopPeekWithDetail.waitFor({ state: "visible", timeout: 10000 });
+  await clickControl(page.getByRole("button", { name: "總覽", exact: true }));
+  await page.waitForTimeout(1800);
+  await clickControl(page.getByRole("button", { name: "Seed 大腦", exact: true }).first());
+  await page.waitForTimeout(350);
+  await detail.waitFor({ state: "visible", timeout: 10000 });
+  const detailBounds = await detail.boundingBox();
+  const desktopPeekWithDetailBounds = await desktopPeekWithDetail.boundingBox();
+  if (
+    !detailBounds
+    || !desktopPeekWithDetailBounds
+    || desktopPeekWithDetailBounds.x + desktopPeekWithDetailBounds.width > detailBounds.x
+  ) {
+    failures.push("desktop life history edge tab overlaps selected-unit details");
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -368,7 +468,7 @@ async function verifyLifeStream(page) {
   await page.waitForTimeout(350);
   const narrowSelection = await page.locator(".detail-panel h2").innerText().catch(() => "");
   if (narrowSelection !== "Seed 大腦") failures.push(`collapsed narrow life history prevented 3D selection: ${narrowSelection || "nothing"}`);
-  return { eventCount, learningCount, retentionCopy, apiContract, eventDetailsVisible, narrowSelection, failures };
+  return { desktopPeekBounds, desktopPeekWithDetailBounds, eventCount, learningCount, retentionCopy, apiContract, eventDetailsVisible, narrowSelection, failures };
 }
 
 async function inspect(page, name, viewport, { enterSeed = false, enterTimeline = false, background = "detailed" } = {}) {
@@ -437,7 +537,7 @@ await mkdir(outputDir, { recursive: true });
 const browser = await chromium.launch({
   executablePath: chromePath,
   headless: true,
-  args: ["--use-angle=swiftshader", "--enable-webgl", "--ignore-gpu-blocklist", "--autoplay-policy=no-user-gesture-required"],
+  args: ["--enable-webgl", "--ignore-gpu-blocklist", "--autoplay-policy=no-user-gesture-required"],
 });
 try {
   const page = await browser.newPage();
@@ -458,6 +558,7 @@ try {
   };
   const zoom = await runStage("zoom", () => verifyZoomPersistence(page));
   const controls = await runStage("controls", () => verifyControls(page));
+  const musicLayout = await runStage("music-layout", () => verifyNarrowMusicSettings(page));
   const picking = await runStage("picking-navigation", () => verifyPickingAndNavigation(page));
   const activity = await runStage("activity", () => verifyActivityAndTreatments(page));
   const lifeStream = await runStage("life-stream", () => verifyLifeStream(page));
@@ -477,12 +578,13 @@ try {
     ...results.flatMap((result) => result.failures.map((failure) => `${result.name}: ${failure}`)),
     ...zoom.failures.map((failure) => `desktop-zoom: ${failure}`),
     ...controls.failures.map((failure) => `controls: ${failure}`),
+    ...musicLayout.failures.map((failure) => `music-layout: ${failure}`),
     ...picking.failures.map((failure) => `picking-navigation: ${failure}`),
     ...activity.failures.map((failure) => `activity: ${failure}`),
     ...lifeStream.failures.map((failure) => `life-stream: ${failure}`),
     ...runtimeErrors,
   ];
-  console.log(JSON.stringify({ status: failures.length ? "FAIL" : "PASS", zoom, controls, picking, activity, lifeStream, results, failures }, null, 2));
+  console.log(JSON.stringify({ status: failures.length ? "FAIL" : "PASS", zoom, controls, musicLayout, picking, activity, lifeStream, results, failures }, null, 2));
   if (failures.length) process.exitCode = 1;
 } finally {
   await browser.close();

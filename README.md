@@ -13,10 +13,10 @@ evidence, Seed Memory proposal workflows, maintainer subsystem treatments, and
 three visual worlds. Activity is derived from existing Canopy receipts and task
 summaries without copying raw prompts or adding a second event database.
 
-The optional background arrangements use local acoustic samples from the
-FluidR3 General MIDI soundfont under CC BY 3.0. Attribution and sample details
-are recorded in `public/assets/audio/README.md`; no audio is copied from the
-operator's musical reference.
+The optional background music is hosted locally from credited CC0 and Creative
+Commons sources so playback stays offline and predictable. Attribution and
+source details are recorded in `public/assets/audio/README.md`; no audio or
+melody is copied from the operator's musical reference.
 
 ## Quick Start
 
