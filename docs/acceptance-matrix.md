@@ -9,7 +9,7 @@ exist. Later requests extend this list instead of replacing earlier items.
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
 | B01 | The Living System is optional; Canopy does not depend on its runtime or database. | Implemented | `AGENTS.md`, `backend/app/canopy_adapter.py` |
-| B02 | Localhost-first deployment with one command to install, build, start, update, doctor, and uninstall. | Implemented | `observatory`, `README.md`, Canopy extension adapter |
+| B02 | Localhost-first deployment with one command to install, build, start, update, doctor, and uninstall. | Implemented | `living-system`, legacy `observatory` alias, `README.md`, Canopy extension adapter |
 | B03 | Runtime data is local and excluded from Git. | Implemented | `.gitignore`, `.data/`, SQLite settings |
 | B04 | Operator card changes go through an AI-reviewed proposal, never direct JSONL mutation. | Implemented | `TreatmentComposer.tsx`, `backend/app/proposals.py` |
 | B05 | Developers may request Canopy subsystem improvements through the owning workflow. | Implemented | Module detail UI creates owner-routed treatment requests with a bounded manual Codex handoff. |
@@ -20,7 +20,7 @@ exist. Later requests extend this list instead of replacing earlier items.
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
 | V01 | A lively 3D greenhouse with red, yellow, green, and unknown health signals. | Implemented | `CanopyScene.tsx`, `styles.css` |
-| V02 | Detailed, friendly/simple, and no-background modes; simple living units remain in no-background mode. | Implemented | Browser inspection plus `./observatory visual-test` across all three desktop modes. |
+| V02 | Detailed, friendly/simple, and no-background modes; simple living units remain in no-background mode. | Implemented | Browser inspection plus `./living-system visual-test` across all three desktop modes. |
 | V03 | Traditional Chinese, Simplified Chinese, and English UI. | Implemented | `i18n.ts` |
 | V04 | Seed card identifiers have readable translated display labels without changing source IDs. | Implemented | `cardDisplayName()` |
 | V05 | Organs use purpose-specific detailed/simple shapes instead of identical spheres. | Implemented | Organ glyph components |
@@ -56,7 +56,7 @@ exist. Later requests extend this list instead of replacing earlier items.
 | N04 | A 30-day timeline can replay prompts, card changes, schedules, distillation, compression, and cleanup. | Implemented | Replay derives safe task summaries, execution outcomes, Seed actions/intake, and miss analysis from existing evidence; raw prompts are intentionally excluded. |
 | N05 | Timeline storage has explicit retention, cleanup, privacy, and growth bounds. | Implemented | Canopy derives at most 160 events without new storage; the Living System prunes snapshots after 30 days/500 rows and treatments after 90 days/200 rows. |
 | N06 | Historic growth can be viewed as meaningful milestones rather than raw event volume. | Implemented | Daily activity, at most 12 deduplicated milestones, active-unit highlighting, and tree growth replay are visible in the timeline. |
-| N07 | “重新同步生命體” revalidates all modules, connections, and structure before rebuilding the local view. | Implemented | `backend/app/topology.py`, `POST /api/sync`, the single UI sync action, `./observatory sync`, last-known-good rejection behavior, and 18 backend contract tests. |
+| N07 | “重新同步生命體” revalidates all modules, connections, and structure before rebuilding the local view. | Implemented | `backend/app/topology.py`, `POST /api/sync`, the single UI sync action, `./living-system sync`, last-known-good rejection behavior, and 18 backend contract tests. |
 
 ## Treatment And Integration
 

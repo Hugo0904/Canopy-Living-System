@@ -45,10 +45,6 @@ def venv_python() -> Path:
     return ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
-def venv_pip() -> Path:
-    return ROOT / ".venv" / ("Scripts/pip.exe" if os.name == "nt" else "bin/pip")
-
-
 def resolve_canopy_root(raw: str) -> Path:
     return Path(raw or os.getenv("CANOPY_ROOT", "") or DEFAULT_CANOPY_ROOT).expanduser().resolve()
 
@@ -123,7 +119,17 @@ def install(canopy_root: Path) -> None:
     if not venv_python().is_file():
         require_success(run([sys.executable, "-m", "venv", str(ROOT / ".venv")]), "venv")
     require_success(
-        run([str(venv_pip()), "install", "--disable-pip-version-check", "-r", "requirements.txt"]),
+        run(
+            [
+                str(venv_python()),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "-r",
+                "requirements.txt",
+            ]
+        ),
         "Python dependency installation",
     )
     npm, node_env = node_tooling()
@@ -221,6 +227,7 @@ def start(canopy_root: Path, *, preferred_port: int, open_browser: bool) -> str:
     env = {
         **os.environ,
         "CANOPY_ROOT": str(canopy_root),
+        "CANOPY_LIVING_SYSTEM_DATA_DIR": str(DATA_DIR),
         "CANOPY_OBSERVATORY_DATA_DIR": str(DATA_DIR),
     }
     process = subprocess.Popen(
@@ -333,7 +340,7 @@ def sync_projection(canopy_root: Path) -> dict[str, object]:
         return payload
 
     if not venv_python().is_file():
-        raise RuntimeError("Living System is not installed; run ./observatory start first")
+        raise RuntimeError("Living System is not installed; run ./living-system start first")
     script = (
         "import asyncio, json\n"
         "from backend.app.main import initialize_runtime, snapshot_sync_state, sync_snapshot\n"
@@ -345,6 +352,7 @@ def sync_projection(canopy_root: Path) -> dict[str, object]:
     env = {
         **os.environ,
         "CANOPY_ROOT": str(canopy_root),
+        "CANOPY_LIVING_SYSTEM_DATA_DIR": str(DATA_DIR),
         "CANOPY_OBSERVATORY_DATA_DIR": str(DATA_DIR),
     }
     result = run([str(venv_python()), "-c", script], timeout=240, env=env)

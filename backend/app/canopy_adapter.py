@@ -309,7 +309,7 @@ class CanopyAdapter:
         }
 
     def _seed_health(self) -> tuple[dict[str, Any], str]:
-        with tempfile.TemporaryDirectory(prefix="canopy-observatory-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="canopy-living-system-") as temp_dir:
             output_path = Path(temp_dir) / "seed-health.json"
             command = [
                 sys.executable,

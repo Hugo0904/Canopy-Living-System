@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { chromium } from "playwright-core";
 import { PNG } from "pngjs";
 
-const baseUrl = process.env.CANOPY_OBSERVATORY_URL || "http://127.0.0.1:8765";
+const baseUrl = process.env.CANOPY_LIVING_SYSTEM_URL || process.env.CANOPY_OBSERVATORY_URL || "http://127.0.0.1:8765";
 const chromePath = process.env.CHROME_BIN || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const outputDir = new URL("../.data/visual/", import.meta.url);
 

@@ -63,8 +63,8 @@ Normal use is automatic. If an immediate refresh is needed, use the UI action
 **重新同步生命體並確認所有連接**. For a stopped UI or terminal diagnosis:
 
 ```bash
-cd /Users/shawn/Code/Canopy-Observatory
-./observatory sync --canopy-root /Users/shawn/Code/Canopy
+cd /Users/shawn/Code/Canopy-Living-System
+./living-system sync --canopy-root /Users/shawn/Code/Canopy
 ```
 
 Success reports verified living-unit and connection counts. Failure names the

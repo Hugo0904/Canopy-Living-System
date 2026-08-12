@@ -19,7 +19,7 @@
 - Treat the instruction `重新同步生命體` as one bounded operation: read the public snapshot, validate the complete graph, atomically refresh the rebuildable projection only on success, regenerate deterministic generic layout for unknown IDs, and report module/connection deltas.
 - New public module IDs must render without a frontend release. Stable bespoke coordinates, icons, translations, and models are progressive enhancement only; their absence must fall back to a readable name, generic glyph, and collision-avoiding deterministic position.
 - Every declared connection must have a unique ID, valid source and target, non-self endpoint, and matching signal semantics. Every multi-module topology must connect every top-level module. Every structure node must be reachable from the declared root with one containing parent.
-- Automatic background synchronization is the default. The UI provides one explicit recovery action; `./observatory sync` is the documented CLI fallback. A failed or unavailable new topology must leave the last verified projection usable and must never affect Canopy Core operation.
+- Automatic background synchronization is the default. The UI provides one explicit recovery action; `./living-system sync` is the documented CLI fallback. The legacy `./observatory` entrypoint remains a compatibility alias. A failed or unavailable new topology must leave the last verified projection usable and must never affect Canopy Core operation.
 - Follow the provider/consumer checklist in `docs/topology-sync-contract.md` whenever a Canopy feature changes the public living-system graph.
 
 ## Data And Security

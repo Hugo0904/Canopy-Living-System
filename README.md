@@ -23,7 +23,7 @@ melody is copied from the operator's musical reference.
 From this repository:
 
 ```bash
-./observatory start --canopy-root /path/to/Canopy
+./living-system start --canopy-root /path/to/Canopy
 ```
 
 The first run creates an isolated Python environment, installs frontend
@@ -33,18 +33,18 @@ opens the browser. Later runs reuse the installation.
 When the Canopy adapter is installed, the shorter command is:
 
 ```bash
-canopy observatory
+canopy living-system
 ```
 
 ## Lifecycle
 
 ```bash
-./observatory doctor --canopy-root /path/to/Canopy
-./observatory start --canopy-root /path/to/Canopy
-./observatory sync --canopy-root /path/to/Canopy
-./observatory stop
-./observatory update --canopy-root /path/to/Canopy
-./observatory uninstall
+./living-system doctor --canopy-root /path/to/Canopy
+./living-system start --canopy-root /path/to/Canopy
+./living-system sync --canopy-root /path/to/Canopy
+./living-system stop
+./living-system update --canopy-root /path/to/Canopy
+./living-system uninstall
 ```
 
 `uninstall` removes generated local runtime data and dependencies from this
@@ -52,7 +52,7 @@ checkout. It does not remove Canopy, Seed Memory, or this Git repository.
 
 The Living System normally synchronizes in the background. The UI action
 **Sync living system** forces the same bounded refresh and reports how many
-living units and connections were verified. `./observatory sync` is the CLI
+living units and connections were verified. `./living-system sync` is the CLI
 fallback for maintenance or diagnosis; an invalid graph never replaces the
 last verified SQLite projection.
 
@@ -75,12 +75,15 @@ compatible local Node installation, so use it for reproducible builds:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
-./observatory install --canopy-root /path/to/Canopy
-./observatory build
+./living-system install --canopy-root /path/to/Canopy
+./living-system build
 ```
 
 For frontend hot reload, start the backend and then run Vite with a Node 20+
 installation. The Vite server proxies `/api` to port 8765.
+
+The former `./observatory` and `canopy observatory` commands remain compatibility
+aliases for existing local installations; new documentation uses Living System.
 
 ```bash
 CANOPY_ROOT=/path/to/Canopy .venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8765

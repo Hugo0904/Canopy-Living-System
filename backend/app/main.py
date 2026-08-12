@@ -191,7 +191,7 @@ class TreatmentInput(BaseModel):
 async def api_health() -> dict[str, Any]:
     return {
         "status": "healthy",
-        "service": "canopy-observatory",
+        "service": "canopy-living-system",
         "canopy_root": str(settings.canopy_root),
         "database": str(settings.database_path),
         "retention": {
