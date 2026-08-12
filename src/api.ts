@@ -1,4 +1,4 @@
-import type { CanopySnapshot, LifeEventsResponse, SyncSnapshotResponse, TreatmentRequest } from "./types";
+import type { CanopySnapshot, EvolutionLabResponse, LifeEventsResponse, SyncSnapshotResponse, TreatmentRequest } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -26,6 +26,10 @@ export function fetchLifeEvents(refresh = false, limit = 220): Promise<LifeEvent
     refresh: refresh ? "true" : "false",
   });
   return request(`/api/life-events?${parameters.toString()}`);
+}
+
+export function fetchEvolutionLab(): Promise<EvolutionLabResponse> {
+  return request("/api/evolution-lab");
 }
 
 export function createTreatment(input: {

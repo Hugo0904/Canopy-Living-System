@@ -296,6 +296,12 @@ async def api_life_events(
     }
 
 
+@app.get("/api/evolution-lab")
+async def api_evolution_lab() -> dict[str, Any]:
+    """Run the bounded public Evolution checks only when the laboratory is opened."""
+    return await asyncio.to_thread(adapter.collect_evolution_lab)
+
+
 @app.post("/api/treatments")
 async def api_create_treatment(payload: TreatmentInput) -> dict[str, Any]:
     snapshot = await asyncio.to_thread(adapter.collect)

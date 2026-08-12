@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .evolution_lab import build_evolution_lab_projection
+
 
 STATUS_ORDER = {"healthy": 0, "attention": 1, "critical": 2, "unknown": 3}
 
@@ -73,6 +75,9 @@ class CanopyAdapter:
         self._cached_at = 0.0
         self._lock = threading.Lock()
         self._activity_lock = threading.Lock()
+        self._evolution_lab_lock = threading.Lock()
+        self._evolution_lab_cached: dict[str, Any] | None = None
+        self._evolution_lab_cached_at = 0.0
 
     def collect(self, *, refresh: bool = False) -> dict[str, Any]:
         with self._lock:
@@ -89,14 +94,20 @@ class CanopyAdapter:
 
     def _run_json(self, arguments: list[str], *, timeout: int = 60) -> tuple[dict[str, Any], str]:
         command = [sys.executable, str(self.canopy_root / "canopy"), *arguments]
-        result = subprocess.run(
-            command,
-            cwd=self.canopy_root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=self.canopy_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {}, f"Canopy command timed out after {timeout}s"
+        except (OSError, RuntimeError) as exc:
+            detail = getattr(exc, "strerror", "") or exc.__class__.__name__
+            return {}, f"Canopy command unavailable: {detail}"
         if result.returncode:
             return {}, (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
         try:
@@ -104,6 +115,27 @@ class CanopyAdapter:
         except json.JSONDecodeError as exc:
             return {}, f"invalid JSON from {' '.join(arguments)}: {exc}"
         return (payload if isinstance(payload, dict) else {}), ""
+
+    def collect_evolution_lab(self) -> dict[str, Any]:
+        """Collect a bounded, read-only evolution projection only when requested."""
+        with self._evolution_lab_lock:
+            if (
+                self._evolution_lab_cached is not None
+                and time.monotonic() - self._evolution_lab_cached_at < self.cache_seconds
+            ):
+                return self._evolution_lab_cached
+            observation, observation_error = self._run_json(
+                ["observe", "evolution", "--json"],
+                timeout=30,
+            )
+            projection = build_evolution_lab_projection(
+                observation=observation,
+                observation_error=observation_error,
+                generated_at=now_iso(),
+            )
+            self._evolution_lab_cached = projection
+            self._evolution_lab_cached_at = time.monotonic()
+            return projection
 
     def collect_activity(
         self,

@@ -243,6 +243,87 @@ export interface SyncSnapshotResponse {
   sync: SnapshotSyncState;
 }
 
+export interface EvolutionLabContract {
+  status?: string;
+  health?: string;
+  version?: string;
+  routing_cases?: number;
+  runtime_chars?: number;
+  runtime_target_chars?: number;
+}
+
+export interface EvolutionLabFinding {
+  id: string;
+  event?: string;
+  status?: string;
+  priority?: string;
+  owner?: string;
+  category?: string;
+  summary?: string;
+  suggested_improvement?: string;
+  evidence?: string[];
+  evidence_truncated?: boolean;
+  case_id?: string;
+  case?: {
+    case_id?: string;
+    current_state?: string;
+    target_outcome?: string;
+  };
+}
+
+export interface EvolutionLabWorkflowStep {
+  id: string;
+  label?: string;
+  state?: string;
+  status?: string;
+  reached_state?: string;
+  evidence_status?: string;
+  basis?: string;
+  artifact_count?: number;
+}
+
+export interface EvolutionLabCaseCandidate {
+  artifact_type?: string;
+  artifact_status?: string;
+  artifact_persisted?: boolean;
+  artifact_persistence?: string;
+  case_id?: string;
+  trigger_source?: string;
+  problem?: string;
+  scope?: string;
+  evidence?: string[];
+  evidence_truncated?: boolean;
+  constraints?: string[];
+  constraints_truncated?: boolean;
+  reached_state?: string;
+  target_outcome?: string;
+}
+
+export interface EvolutionLabResponse {
+  status?: "available" | "unavailable" | string;
+  generated_at?: string;
+  contract?: EvolutionLabContract;
+  summary?: Record<string, string | number | boolean | null | undefined>;
+  monitor?: {
+    health?: string;
+    summary?: Record<string, string | number | boolean | null | undefined>;
+  };
+  findings?: EvolutionLabFinding[];
+  findings_truncated?: boolean;
+  findings_total?: number;
+  findings_omitted?: number;
+  workflow?: EvolutionLabWorkflowStep[];
+  workflow_stages?: EvolutionLabWorkflowStep[];
+  case_candidates?: EvolutionLabCaseCandidate[];
+  case_candidates_truncated?: boolean;
+  case_candidates_total?: number;
+  case_candidates_omitted?: number;
+  totals?: {
+    findings?: number;
+    case_candidates?: number;
+  };
+}
+
 export interface TreatmentRequest {
   id: string;
   request_type: string;

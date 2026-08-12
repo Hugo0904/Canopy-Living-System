@@ -5,13 +5,18 @@ turns Canopy's health, Seed Memory, Brain, roles, Evolution, resource lifecycle,
 hooks, and receipts into a navigable 3D greenhouse.
 
 Canopy continues to work without this repository. The Living System only reads
-Canopy's public snapshot contract and keeps its own local history under
+Canopy's public observation contracts and keeps its own local history under
 `.data/`.
 
 The interface includes a bounded 30-day growth replay, per-living-unit recent
 evidence, Seed Memory proposal workflows, maintainer subsystem treatments, and
 three visual worlds. Activity is derived from existing Canopy receipts and task
 summaries without copying raw prompts or adding a second event database.
+
+The Evolution unit includes a read-only laboratory backed by
+`canopy observe evolution --json`. It shows only bounded, allowlisted public
+metrics and candidate observations; missing Proposal, Review, Experiment,
+Adoption, or Monitoring evidence is shown as unreported rather than inferred.
 
 The optional background music is hosted locally from credited CC0 and Creative
 Commons sources so playback stays offline and predictable. Attribution and

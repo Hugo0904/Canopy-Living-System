@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from backend.app import main as backend_main
 from backend.app.canopy_adapter import CanopyAdapter, normalized_status, worst_status
@@ -26,6 +28,289 @@ class StatusContractTest(unittest.TestCase):
         self.assertEqual(snapshot["source_mode"], "disconnected")
         self.assertEqual(snapshot["overall"]["status"], "critical")
         self.assertEqual(snapshot["seed_memory"]["cards"], [])
+
+
+class EvolutionLabContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.adapter = CanopyAdapter(Path("/opt/canopy"))
+        self.validation = {
+            "status": "PASS",
+            "contract_id": "canopy.directed_evolution",
+            "contract_version": "3.4.0",
+            "routing_case_count": 32,
+            "contract_bundle_chars": 5158,
+            "contract_runtime_target_chars": 7000,
+            "finding_state_path": "/opt/canopy/state/evolution_findings.json",
+            "warnings": [],
+            "errors": [],
+        }
+        self.monitor = {
+            "status": "PASS",
+            "state_path": "/opt/canopy/state/evolution_findings.json",
+            "state_updated": False,
+            "summary": {
+                "unchanged": 2,
+                "regressed": 1,
+                "new": 1,
+                "active": 4,
+                "stored": 7,
+                "reportable": 2,
+                "report_truncated": False,
+            },
+            "reportable": [
+                {
+                    "finding_id": "finding-0",
+                    "event": "regressed",
+                    "source_refs": ["/private/evolution/findings.jsonl"],
+                }
+            ],
+            "findings": [
+                {
+                    "id": f"finding-{index}",
+                    "status": "open",
+                    "priority": "medium",
+                    "category": "evidence_gap",
+                    "owner": "canopy_core",
+                    "scope": "seed-lifecycle",
+                    "summary": f"Finding {index}",
+                    "suggested_improvement": "Inspect the bounded public evidence.",
+                    "evidence": [
+                        "/opt/canopy/private.jsonl",
+                        "token=should-not-leak",
+                        "metric=1",
+                        "metric=2",
+                        "metric=3",
+                        "metric=4",
+                    ],
+                    "source_refs": ["/opt/canopy/private.jsonl"],
+                    "case": {
+                        "case_id": f"EVO-{index}",
+                        "hidden_reasoning": "must never be projected",
+                    },
+                }
+                for index in range(6)
+            ],
+            "case_candidates": [
+                {
+                    "artifact_type": "EvolutionCase",
+                    "case_id": "EVO-0",
+                    "trigger_source": "manual",
+                    "problem": "A bounded problem statement.",
+                    "scope": "seed-lifecycle",
+                    "evidence": [
+                        "one",
+                        "two",
+                        "three",
+                        "four",
+                        "five",
+                        "six",
+                    ],
+                    "constraints": ["Observation is not mutation authority."],
+                    "current_state": "case_open",
+                    "target_outcome": "Collect enough evidence for review.",
+                    "raw_prompt": "must never be projected",
+                }
+            ],
+        }
+
+        self.observation = {
+            "schema_version": 1,
+            "contract_id": "canopy.observation.evolution",
+            "status": "live",
+            "read_only": {"on_demand": True, "state_updated": False, "confirmed": True},
+            "contract": {"health": "healthy", "id": "canopy.directed_evolution", "version": "3.4.0", "routing_cases": 32, "runtime_chars": 5158, "runtime_target_chars": 7000, "warnings": [], "errors": []},
+            "monitor": {"health": "healthy", "trigger_source": "manual", "summary": self.monitor["summary"]},
+            "findings": self.monitor["findings"][:5],
+            "findings_total": 6,
+            "findings_omitted": 1,
+            "findings_truncated": True,
+            "case_candidates": self.monitor["case_candidates"],
+            "case_candidates_truncated": False,
+        }
+        self.observation["findings"] = [
+            {
+                "id": f"finding:{index:012x}",
+                "event": "new",
+                "status": "open",
+                "priority": "medium",
+                "category": "evidence_gap" if index == 0 else "unknown-category",
+                "owner": "canopy_core",
+                "summary": "Core-owned public template",
+                "evidence": [
+                    "required_success_rate=0.98",
+                    "required_closure_rate=0.875",
+                    "required_resolution_rate=1.0",
+                    "unclosed_required=12",
+                    "interrupted_required=2",
+                ],
+                "evidence_truncated": index == 0,
+                "evidence_omitted": 1 if index == 0 else 0,
+                "suggested_improvement": "Core-owned public template",
+                "disposition": "evolution_case",
+                "case_id": f"case:{index:012x}",
+            }
+            for index in range(5)
+        ]
+        self.observation["case_candidates"] = [
+            {
+                "artifact_type": "EvolutionCase",
+                "artifact_status": "candidate_only",
+                "case_id": "case:000000000000",
+                "trigger_source": "manual",
+                "problem": "Core-owned public template",
+                "scope": "unreported",
+                "evidence": ["required_success_rate=0.98"],
+                "constraints": ["Core-owned public template"],
+                "reached_state": "unreported",
+                "target_outcome": "Core-owned public template",
+            }
+        ]
+
+    def test_public_commands_build_a_bounded_sanitized_read_only_projection(self) -> None:
+        with patch.object(
+            self.adapter,
+            "_run_json",
+            return_value=(self.observation, ""),
+        ) as run_json:
+            projection = self.adapter.collect_evolution_lab()
+
+        self.assertEqual(
+            run_json.call_args_list,
+            [call(["observe", "evolution", "--json"], timeout=30)],
+        )
+        self.assertEqual(projection["status"], "live")
+        self.assertTrue(projection["read_only"]["confirmed"])
+        self.assertEqual(projection["contract"]["version"], "3.4.0")
+        self.assertEqual(projection["contract"]["routing_cases"], 32)
+        self.assertEqual(projection["contract"]["runtime_chars"], 5158)
+        self.assertEqual(projection["monitor"]["summary"]["active"], 4)
+        self.assertEqual(len(projection["findings"]), 5)
+        self.assertTrue(projection["findings_truncated"])
+        self.assertEqual(projection["findings_total"], 6)
+        self.assertEqual(projection["findings_omitted"], 1)
+        self.assertEqual(len(projection["findings"][0]["evidence"]), 5)
+        self.assertTrue(projection["findings"][0]["evidence_truncated"])
+        self.assertEqual(projection["case_candidates"][0]["artifact_status"], "candidate_only")
+        self.assertEqual(
+            projection["case_candidates"][0]["artifact_persistence"],
+            "unreported",
+        )
+        self.assertEqual(projection["case_candidates"][0]["reached_state"], "unreported")
+        self.assertEqual(projection["workflow_stages"][0]["status"], "candidate_only")
+        self.assertTrue(
+            all(
+                stage["status"] == "unreported"
+                for stage in projection["workflow_stages"][1:]
+            )
+        )
+        self.assertEqual(
+            [stage["id"] for stage in projection["workflow_stages"]],
+            ["case", "proposal", "review", "experiment", "adoption", "monitoring"],
+        )
+        serialized = json.dumps(projection)
+        self.assertNotIn("source_refs", serialized)
+        self.assertNotIn("raw_prompt", serialized)
+        self.assertNotIn("hidden_reasoning", serialized)
+        self.assertNotIn("/opt/", serialized)
+        self.assertNotIn("/private/", serialized)
+        self.assertNotIn("should-not-leak", serialized)
+        self.assertIn('"category": "unavailable"', serialized)
+
+    def test_numeric_injection_is_rejected_by_category_and_value_bounds(self) -> None:
+        observation = dict(self.observation)
+        observation["findings"] = [
+            {
+                **self.observation["findings"][0],
+                "category": "miss",
+                "evidence": [
+                    "closed_turns=4111111111111111",
+                    "hits=12345678901234567890",
+                ],
+            },
+            {
+                **self.observation["findings"][0],
+                "id": "finding:000000000001",
+                "category": "evidence_gap",
+                "evidence": [
+                    "required_success_rate=0.98",
+                    "unclosed_required=123456",
+                    "closed_turns=12",
+                ],
+            },
+        ]
+        with patch.object(self.adapter, "_run_json", return_value=(observation, "")):
+            projection = self.adapter.collect_evolution_lab()
+
+        serialized = json.dumps(projection)
+        self.assertEqual(projection["findings"][0]["evidence"], [])
+        self.assertEqual(
+            projection["findings"][1]["evidence"],
+            ["required_success_rate=0.98"],
+        )
+        self.assertNotIn("4111111111111111", serialized)
+        self.assertNotIn("12345678901234567890", serialized)
+        self.assertNotIn("unclosed_required=123456", serialized)
+
+    def test_cli_failures_return_an_unavailable_contract_instead_of_raising(self) -> None:
+        with patch.object(
+            self.adapter,
+            "_run_json",
+            return_value=({}, "observation failed at /opt/canopy"),
+        ):
+            projection = self.adapter.collect_evolution_lab()
+
+        self.assertEqual(projection["status"], "unavailable")
+        self.assertEqual(projection["source_mode"], "unavailable")
+        self.assertFalse(projection["read_only"]["confirmed"])
+        self.assertEqual(projection["findings"], [])
+        self.assertEqual(projection["case_candidates"], [])
+        self.assertTrue(
+            all(stage["status"] == "unreported" for stage in projection["workflow_stages"])
+        )
+        self.assertNotIn("/opt/", json.dumps(projection))
+
+    def test_command_timeout_is_contained_as_fail_open_evidence(self) -> None:
+        with patch("backend.app.canopy_adapter.subprocess.run", side_effect=subprocess.TimeoutExpired("canopy", 1)):
+            payload, error = self.adapter._run_json(
+                ["evolution", "validate", "--json"],
+                timeout=1,
+            )
+
+        self.assertEqual(payload, {})
+        self.assertEqual(error, "Canopy command timed out after 1s")
+
+    def test_reopening_the_laboratory_reuses_the_short_bounded_cache(self) -> None:
+        with patch.object(
+            self.adapter,
+            "_run_json",
+            return_value=(self.observation, ""),
+        ) as run_json:
+            first = self.adapter.collect_evolution_lab()
+            second = self.adapter.collect_evolution_lab()
+
+        self.assertIs(second, first)
+        self.assertEqual(run_json.call_count, 1)
+
+
+class EvolutionLabApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_api_collects_only_when_the_evolution_lab_endpoint_is_requested(self) -> None:
+        route = next(
+            route for route in backend_main.app.routes if route.path == "/api/evolution-lab"
+        )
+        self.assertIn("GET", route.methods)
+        expected = {
+            "contract_id": "canopy.living-system.evolution-lab",
+            "status": "live",
+        }
+        with patch.object(
+            backend_main.adapter,
+            "collect_evolution_lab",
+            return_value=expected,
+        ) as collect:
+            response = await backend_main.api_evolution_lab()
+
+        self.assertEqual(response, expected)
+        collect.assert_called_once_with()
 
 
 def topology_snapshot(*, extra_module: bool = False) -> dict:

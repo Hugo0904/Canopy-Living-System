@@ -34,6 +34,7 @@ import { fetchLifeEvents, fetchSnapshot, syncSnapshot } from "./api";
 import { AmbientBgm, ambientTrackInfo, playUiClick, type AmbientTrackId } from "./audio/ambientBgm";
 import { CanopyScene, type EffectDistance, type VisualEffects } from "./components/CanopyScene";
 import { ActivityTimeline } from "./components/ActivityTimeline";
+import { EvolutionLab } from "./components/EvolutionLab";
 import { LifeStreamPanel } from "./components/LifeStreamPanel";
 import { TreatmentComposer } from "./components/TreatmentComposer";
 import {
@@ -223,6 +224,53 @@ function ArchitectureFlows({
   );
 }
 
+function derivePublicSourcePaths(nodes: StructureNode[], rootId: string): string[] {
+  const children = new Map<string, StructureNode[]>();
+  nodes.forEach((node) => {
+    if (!node.parent_id) return;
+    const siblings = children.get(node.parent_id) ?? [];
+    siblings.push(node);
+    children.set(node.parent_id, siblings);
+  });
+  const root = nodes.find((node) => node.id === rootId);
+  if (!root) return [];
+  const pending = [root];
+  const visited = new Set<string>();
+  const paths = new Set<string>();
+  while (pending.length) {
+    const current = pending.shift();
+    if (!current || visited.has(current.id)) continue;
+    visited.add(current.id);
+    if (current.path) paths.add(current.path);
+    (children.get(current.id) ?? []).forEach((child) => pending.push(child));
+  }
+  return [...paths];
+}
+
+function ProjectionNotice({ locale }: { locale: Locale }) {
+  return (
+    <p className="topology-projection-notice">
+      <GitBranch size={14} />
+      <span><strong>{t(locale, "topology.projection_title")}</strong>{t(locale, "topology.projection_note")}</span>
+    </p>
+  );
+}
+
+function PublicSourcePaths({ paths, locale }: { paths: string[]; locale: Locale }) {
+  const visible = paths.slice(0, 8);
+  return (
+    <section className="public-source-paths" aria-label={t(locale, "topology.public_sources")}>
+      <h3>{t(locale, "topology.public_sources")}</h3>
+      {visible.length ? (
+        <>
+          <ul>{visible.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+          {paths.length > visible.length && <small>{t(locale, "topology.more_sources", { count: paths.length - visible.length })}</small>}
+        </>
+      ) : <p>{t(locale, "topology.no_public_source")}</p>}
+    </section>
+  );
+}
+
 function DetailPanel({
   module,
   card,
@@ -291,6 +339,7 @@ function DetailPanel({
       .map((nodeId) => structureNodes.find((node) => node.id === nodeId))
       .filter((node): node is StructureNode => Boolean(node));
     const StructureIcon = structureNode.kind === "component" ? FileCode2 : structureNode.kind === "tissue" ? FolderTree : GitBranch;
+    const publicSourcePaths = derivePublicSourcePaths(structureNodes, structureNode.id);
     return (
       <aside
         className="detail-panel"
@@ -305,12 +354,15 @@ function DetailPanel({
           </div>
           <button className="icon-button" onClick={onClose} aria-label={t(locale, "common.close")}><X size={16} /></button>
         </div>
+        <ProjectionNotice locale={locale} />
         <p className="detail-summary">{structureNode.summary || t(locale, "common.no_summary")}</p>
         <dl className="detail-facts">
           {structureNode.path && <div><dt>{t(locale, "structure.path")}</dt><dd><code className="structure-path">{structureNode.path}</code></dd></div>}
           <div><dt>{t(locale, "structure.children")}</dt><dd>{t(locale, "structure.child_count", { count: structureNode.child_count })}</dd></div>
           {structureNode.size_bytes > 0 && <div><dt>{t(locale, "structure.size")}</dt><dd>{structureNode.size_bytes.toLocaleString(locale)} B</dd></div>}
         </dl>
+        <PublicSourcePaths paths={publicSourcePaths} locale={locale} />
+        {structureNode.module_id === "evolution" && <EvolutionLab locale={locale} />}
         {children.length > 0 && (
           <section className="structure-relations">
             <h3>{t(locale, "structure.children")}</h3>
@@ -343,6 +395,7 @@ function DetailPanel({
   const Icon = MODULE_ICONS[module.id] ?? Activity;
   const activityIds = new Set(activity?.modules[module.id]?.event_ids ?? []);
   const recentActivity = activity?.events.filter((event) => activityIds.has(event.id)).slice(0, 5) ?? [];
+  const publicSourcePaths = derivePublicSourcePaths(structureNodes, `module:${module.id}`);
   return (
     <aside className="detail-panel" aria-label={t(locale, "aria.module_details")}>
       <div className="detail-heading">
@@ -352,6 +405,7 @@ function DetailPanel({
         </div>
         <div className="detail-actions"><StatusPill status={module.health.status} locale={locale} /><button className="icon-button" onClick={onClose} aria-label={t(locale, "common.close")}><X size={16} /></button></div>
       </div>
+      <ProjectionNotice locale={locale} />
       <p className="detail-summary">{moduleSummary(locale, module)}</p>
       <div className="vital-grid">
         <div><span>{t(locale, "metric.health")}</span><strong>{t(locale, `status.${module.health.status}`)}</strong></div>
@@ -364,6 +418,8 @@ function DetailPanel({
           <div key={key}><dt>{metricLabel(locale, key)}</dt><dd><MetricValue value={value} locale={locale} /></dd></div>
         ))}
       </dl>
+      <PublicSourcePaths paths={publicSourcePaths} locale={locale} />
+      {module.id === "evolution" && <EvolutionLab locale={locale} />}
       <section className="recent-activity">
         <h3>{t(locale, "activity.recent")}</h3>
         {recentActivity.length ? recentActivity.map((event) => (
@@ -1120,6 +1176,13 @@ export default function App() {
       <header className="top-hud">
         <div className="brand-lockup"><TreePine size={22} /><div><strong>CANOPY</strong><span>{t(locale, "brand.subtitle")}</span></div></div>
       </header>
+
+      {view === "overview" && (
+        <div className="topology-projection-badge" role="note">
+          <GitBranch size={13} />
+          <span><strong>{t(locale, "topology.projection_title")}</strong>{t(locale, "topology.projection_note")}</span>
+        </div>
+      )}
 
       <nav className="left-dock" aria-label={t(locale, "aria.navigation")} data-compact={compactHud.left ? "true" : "false"}>
         <button className="dock-density-toggle" aria-label={t(locale, compactHud.left ? "hud.expand" : "hud.compact")} title={t(locale, compactHud.left ? "hud.expand" : "hud.compact")} onClick={() => toggleHud("left")}>{compactHud.left ? <Maximize2 size={16} /> : <Minimize2 size={16} />}<span>{t(locale, compactHud.left ? "hud.expand_short" : "hud.compact_short")}</span></button>
