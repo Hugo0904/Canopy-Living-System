@@ -22,6 +22,19 @@ const INTERACTION_PRIORITY = {
 
 const MAX_CLICK_TRAVEL_PX = 4;
 
+export interface VisualEffects {
+  master: boolean;
+  particles: boolean;
+  flow: boolean;
+  clouds: boolean;
+  glow: boolean;
+  motion: boolean;
+}
+
+export type EffectDistance = "near" | "far";
+
+type ActiveVisualEffects = Omit<VisualEffects, "master">;
+
 function interactionPriority(object: THREE.Object3D): number {
   let current: THREE.Object3D | null = object;
   while (current) {
@@ -51,6 +64,7 @@ interface SceneProps {
   structure?: CanopyStructure;
   locale: Locale;
   backgroundMode: "detailed" | "simple" | "none";
+  visualEffects: VisualEffects;
   view: "overview" | "seed" | "structure";
   selectedModuleId: string;
   selectedCardId: string;
@@ -62,6 +76,7 @@ interface SceneProps {
   onSelectCard: (cardId: string) => void;
   onSelectStructure: (nodeId: string) => void;
   onSceneInteraction: () => void;
+  onEffectDistanceChange: (distance: EffectDistance) => void;
 }
 
 function useReducedMotion(): boolean {
@@ -76,13 +91,21 @@ function useReducedMotion(): boolean {
   return reduced;
 }
 
-const IDLE_FRAME_INTERVAL_MS = 1000 / 30;
+// Slow ambient movement does not need display-refresh-rate rendering. Keeping
+// it near 12 fps avoids repainting the entire detailed world for every mote.
+// OrbitControls and focus transitions still invalidate independently while the
+// user is moving the camera, so interaction remains responsive.
+const IDLE_FRAME_INTERVAL_MS = 1000 / 12;
 
-function SceneRenderBudget({ shadowRevision }: { shadowRevision: string }) {
+function SceneRenderBudget({ shadowRevision, active }: { shadowRevision: string; active: boolean }) {
   const gl = useThree((state) => state.gl);
   const invalidate = useThree((state) => state.invalidate);
 
   useEffect(() => {
+    if (!active) {
+      invalidate();
+      return undefined;
+    }
     let animationFrame = 0;
     let lastIdleFrame = 0;
     const requestIdleFrame = (timestamp: number) => {
@@ -104,7 +127,7 @@ function SceneRenderBudget({ shadowRevision }: { shadowRevision: string }) {
       window.cancelAnimationFrame(animationFrame);
       document.removeEventListener("visibilitychange", resume);
     };
-  }, [invalidate]);
+  }, [active, invalidate]);
 
   useEffect(() => {
     const previousAutoUpdate = gl.shadowMap.autoUpdate;
@@ -140,7 +163,7 @@ function CameraRig({
   controlsRef: RefObject<OrbitControlsImpl | null>;
   zonePositions: ZonePositionMap;
 }) {
-  const { camera, size } = useThree();
+  const { camera, invalidate, size } = useThree();
   const destination = useRef(new THREE.Vector3());
   const target = useRef(new THREE.Vector3());
   const animating = useRef(false);
@@ -169,7 +192,8 @@ function CameraRig({
       target.current.set(0, 1.2, 0);
     }
     animating.current = true;
-  }, [focusRevision, selectedModuleId, size.height, size.width, view, zonePositions]);
+    invalidate();
+  }, [focusRevision, invalidate, selectedModuleId, size.height, size.width, view, zonePositions]);
 
   useFrame((_, delta) => {
     const controls = controlsRef.current;
@@ -183,7 +207,9 @@ function CameraRig({
       controls.target.copy(target.current);
       controls.update();
       animating.current = false;
+      return;
     }
+    invalidate();
   });
   return null;
 }
@@ -377,7 +403,7 @@ function TreeSpiritMotes({ detailed, reducedMotion }: { detailed: boolean; reduc
   );
 }
 
-function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: "detailed" | "simple"; locale: Locale; growthProgress: number; onSelect: () => void }) {
+function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visualStyle: "detailed" | "simple"; locale: Locale; growthProgress: number; effects: ActiveVisualEffects; onSelect: () => void }) {
   const detailed = visualStyle === "detailed";
   const reducedMotion = useReducedMotion();
   const leafPositions = useMemo(() => {
@@ -450,8 +476,8 @@ function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: 
           <meshStandardMaterial color={index % 3 === 0 ? "#6b4932" : "#76563a"} roughness={0.92} />
         </mesh>
       ))}
-      <RootSpiritFlow curves={roots} detailed={detailed} reducedMotion={reducedMotion} />
-      <TreeSpiritMotes detailed={detailed} reducedMotion={reducedMotion} />
+      {effects.particles && <RootSpiritFlow curves={roots} detailed={detailed} reducedMotion={reducedMotion} />}
+      {effects.particles && <TreeSpiritMotes detailed={detailed} reducedMotion={reducedMotion} />}
       <mesh position={[0, 2.35, 0]} castShadow>
         <cylinderGeometry args={[detailed ? 0.76 : 0.72, detailed ? 1.38 : 1.15, 5.15, detailed ? 24 : 7]} />
         <meshStandardMaterial color={detailed ? "#69472f" : "#765137"} roughness={0.9} />
@@ -554,9 +580,9 @@ function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: 
           </mesh>
           <mesh>
             <octahedronGeometry args={[0.16, 1]} />
-            <meshPhysicalMaterial color="#ffe29a" emissive="#ffbd62" emissiveIntensity={2.4} roughness={0.28} transmission={0.12} />
+            <meshPhysicalMaterial color="#ffe29a" emissive="#ffbd62" emissiveIntensity={effects.glow ? 2.4 : 0.12} roughness={0.28} transmission={0.12} />
           </mesh>
-          <pointLight color="#ffd080" intensity={1.6} distance={2.4} />
+          {effects.glow && <pointLight color="#ffd080" intensity={1.6} distance={2.4} />}
         </group>
       ))}
       {detailed && [[-1.15, 0.42, 0.95], [1.38, 0.34, 0.6], [0.65, 0.3, -1.2]].map(([x, y, z], index) => (
@@ -565,8 +591,8 @@ function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: 
           <mesh position={[0, 0.25, 0]} scale={[1, 0.42, 1]}><sphereGeometry args={[0.16, 12, 8]} /><meshStandardMaterial color={index % 2 ? "#d9785d" : "#e9ad61"} emissive="#8f4e32" emissiveIntensity={0.16} roughness={0.82} /></mesh>
         </group>
       ))}
-      <pointLight position={[0, 4.5, 0]} color="#ffd36b" intensity={detailed ? 5.5 : 3.4} distance={9} />
-      <Sparkles count={detailed ? 66 : 28} scale={[5.5, 6.5, 5.5]} size={detailed ? 1.8 : 2.4} speed={reducedMotion ? 0 : 0.22} color="#ffe59a" />
+      {effects.glow && <pointLight position={[0, 4.5, 0]} color="#ffd36b" intensity={detailed ? 5.5 : 3.4} distance={9} />}
+      {effects.particles && <Sparkles count={detailed ? 66 : 28} scale={[5.5, 6.5, 5.5]} size={detailed ? 1.8 : 2.4} speed={reducedMotion ? 0 : 0.22} color="#ffe59a" />}
       <Html position={[0, 7.55, 0]} center distanceFactor={11} zIndexRange={[19, 0]}>
         <button className="world-landmark-label tree-label" onClick={onSelect}>{t(locale, "structure.tree")}</button>
       </Html>
@@ -574,7 +600,7 @@ function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: 
   );
 }
 
-function AncientRuins() {
+function AncientRuins({ glowEnabled }: { glowEnabled: boolean }) {
   const columns = useMemo(() => Array.from({ length: 8 }, (_, index) => {
     const angle = Math.PI + (index / 7) * Math.PI;
     const radius = 8.3 + (index % 2) * 0.45;
@@ -593,7 +619,7 @@ function AncientRuins() {
       </mesh>
       <mesh position={[0, 0.16, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[7.65, 7.82, 64]} />
-        <meshStandardMaterial color="#75d3aa" emissive="#3fb98a" emissiveIntensity={0.7} transparent opacity={0.72} />
+        <meshStandardMaterial color="#75d3aa" emissive="#3fb98a" emissiveIntensity={glowEnabled ? 0.7 : 0.05} transparent opacity={0.72} />
       </mesh>
       {Array.from({ length: 16 }, (_, index) => {
         const angle = (index / 16) * Math.PI * 2;
@@ -601,7 +627,7 @@ function AncientRuins() {
         return (
           <mesh key={`rune-${index}`} position={[Math.cos(angle) * radius, 0.19, Math.sin(angle) * radius]} rotation={[-Math.PI / 2, 0, -angle]}>
             <boxGeometry args={[0.34, 0.08, 0.72]} />
-            <meshStandardMaterial color={index % 3 === 0 ? "#8de4bd" : "#788d7d"} emissive="#50c996" emissiveIntensity={index % 3 === 0 ? 0.8 : 0.18} roughness={0.86} />
+            <meshStandardMaterial color={index % 3 === 0 ? "#8de4bd" : "#788d7d"} emissive="#50c996" emissiveIntensity={glowEnabled ? (index % 3 === 0 ? 0.8 : 0.18) : 0.03} roughness={0.86} />
           </mesh>
         );
       })}
@@ -618,7 +644,7 @@ function AncientRuins() {
           {index % 2 === 0 && (
             <mesh position={[0, 0.15, 0.41]}>
               <torusGeometry args={[0.16, 0.035, 6, 18]} />
-              <meshStandardMaterial color="#8be6bf" emissive="#58dba5" emissiveIntensity={1.1} />
+              <meshStandardMaterial color="#8be6bf" emissive="#58dba5" emissiveIntensity={glowEnabled ? 1.1 : 0.06} />
             </mesh>
           )}
         </group>
@@ -631,9 +657,9 @@ function AncientRuins() {
           </mesh>
           <mesh position={[0, 0.72, 0]}>
             <octahedronGeometry args={[0.2, 0]} />
-            <meshStandardMaterial color="#ffd17a" emissive="#ffaf4f" emissiveIntensity={2.2} />
+            <meshStandardMaterial color="#ffd17a" emissive="#ffaf4f" emissiveIntensity={glowEnabled ? 2.2 : 0.08} />
           </mesh>
-          <pointLight position={[0, 0.72, 0]} color="#ffc267" intensity={2.4} distance={3.5} />
+          {glowEnabled && <pointLight position={[0, 0.72, 0]} color="#ffc267" intensity={2.4} distance={3.5} />}
         </group>
       ))}
       <group position={[0, 1.75, -8.25]}>
@@ -655,9 +681,9 @@ function AncientRuins() {
         </mesh>
         <mesh position={[0, 0.2, 0.44]}>
           <torusGeometry args={[0.8, 0.075, 8, 32]} />
-          <meshStandardMaterial color="#8de6c0" emissive="#4fd19d" emissiveIntensity={1.15} transparent opacity={0.82} />
+          <meshStandardMaterial color="#8de6c0" emissive="#4fd19d" emissiveIntensity={glowEnabled ? 1.15 : 0.08} transparent opacity={0.82} />
         </mesh>
-        <pointLight position={[0, 0.25, 1.1]} color="#7ee7bd" intensity={7} distance={5} />
+        {glowEnabled && <pointLight position={[0, 0.25, 1.1]} color="#7ee7bd" intensity={7} distance={5} />}
       </group>
       {Array.from({ length: 10 }, (_, index) => (
         <mesh key={`step-${index}`} position={[(index % 2 ? 0.34 : -0.28), 0.16, 6.6 - index * 1.25]} rotation={[-Math.PI / 2, 0, (index % 3 - 1) * 0.08]}>
@@ -665,8 +691,8 @@ function AncientRuins() {
           <meshStandardMaterial color={index % 3 === 0 ? "#788c7d" : "#6f776d"} roughness={1} />
         </mesh>
       ))}
-      <spotLight position={[-6, 11, 5]} angle={0.34} penumbra={0.8} intensity={4.5} color="#dfffc5" distance={25} />
-      <spotLight position={[7, 9, -3]} angle={0.28} penumbra={0.9} intensity={3.2} color="#9de7ca" distance={22} />
+      {glowEnabled && <spotLight position={[-6, 11, 5]} angle={0.34} penumbra={0.8} intensity={4.5} color="#dfffc5" distance={25} />}
+      {glowEnabled && <spotLight position={[7, 9, -3]} angle={0.28} penumbra={0.9} intensity={3.2} color="#9de7ca" distance={22} />}
     </group>
   );
 }
@@ -938,8 +964,8 @@ function OrganGlyph({ moduleId, color, detailed }: { moduleId: string; color: st
   return <GenericOrganGlyph moduleId={moduleId} color={color} detailed={detailed} />;
 }
 
-function OrganSanctuary({ moduleId, color, activityActive }: { moduleId: string; color: string; activityActive: boolean }) {
-  const glow = activityActive ? 1.05 : 0.38;
+function OrganSanctuary({ moduleId, color, activityActive, glowEnabled }: { moduleId: string; color: string; activityActive: boolean; glowEnabled: boolean }) {
+  const glow = glowEnabled ? (activityActive ? 1.05 : 0.38) : 0.04;
   const ringMaterial = <meshStandardMaterial color={color} emissive={color} emissiveIntensity={glow} transparent opacity={activityActive ? 0.86 : 0.58} roughness={0.52} />;
   if (moduleId === "seed-memory") {
     return (
@@ -1042,7 +1068,7 @@ function OrganSanctuary({ moduleId, color, activityActive }: { moduleId: string;
   );
 }
 
-function RootPaths({ activeModuleIds, zonePositions }: { activeModuleIds: string[]; zonePositions: ZonePositionMap }) {
+function RootPaths({ activeModuleIds, zonePositions, glowEnabled }: { activeModuleIds: string[]; zonePositions: ZonePositionMap; glowEnabled: boolean }) {
   const paths = useMemo(() => Object.entries(zonePositions).map(([moduleId, [x, , z]], index) => ({
     moduleId,
     curve: new THREE.CatmullRomCurve3([
@@ -1058,7 +1084,7 @@ function RootPaths({ activeModuleIds, zonePositions }: { activeModuleIds: string
         return (
           <group key={moduleId}>
             <mesh><tubeGeometry args={[curve, 36, 0.075, 7, false]} /><meshStandardMaterial color="#7d684a" roughness={0.96} transparent opacity={0.7} /></mesh>
-            <mesh position={[0, 0.03, 0]}><tubeGeometry args={[curve, 36, 0.018, 6, false]} /><meshStandardMaterial color={active ? "#ffe49a" : "#62b88e"} emissive={active ? "#ffd36b" : "#3a8d69"} emissiveIntensity={active ? 1.4 : 0.42} transparent opacity={active ? 0.92 : 0.5} /></mesh>
+            {glowEnabled && <mesh position={[0, 0.03, 0]}><tubeGeometry args={[curve, 36, 0.018, 6, false]} /><meshStandardMaterial color={active ? "#ffe49a" : "#62b88e"} emissive={active ? "#ffd36b" : "#3a8d69"} emissiveIntensity={active ? 1.4 : 0.42} transparent opacity={active ? 0.92 : 0.5} /></mesh>}
           </group>
         );
       })}
@@ -1071,11 +1097,13 @@ function SanctuaryPlatform({
   stone,
   selected,
   activityActive,
+  glowEnabled,
 }: {
   color: string;
   stone: string;
   selected: boolean;
   activityActive: boolean;
+  glowEnabled: boolean;
 }) {
   const energy = selected ? 1.35 : activityActive ? 0.92 : 0.5;
   return (
@@ -1092,13 +1120,13 @@ function SanctuaryPlatform({
         <circleGeometry args={[0.72, 36]} />
         <meshPhysicalMaterial color="#4d7464" roughness={0.42} clearcoat={0.12} transparent opacity={0.72} />
       </mesh>
-      <mesh position={[0, 0.196, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      {glowEnabled && <mesh position={[0, 0.196, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <torusGeometry args={[0.56, 0.018, 7, 64]} />
         <meshBasicMaterial color={color} transparent opacity={0.78} blending={THREE.AdditiveBlending} depthWrite={false} />
-      </mesh>
+      </mesh>}
       <mesh position={[0, -0.005, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <torusGeometry args={[1.11, 0.035, 7, 64]} />
-        <meshStandardMaterial color="#b9c3a8" emissive={color} emissiveIntensity={0.16 * energy} roughness={0.75} />
+        <meshStandardMaterial color="#b9c3a8" emissive={color} emissiveIntensity={glowEnabled ? 0.16 * energy : 0.02} roughness={0.75} />
       </mesh>
       {Array.from({ length: 4 }, (_, index) => {
         const angle = index * Math.PI / 2 + Math.PI / 4;
@@ -1111,7 +1139,7 @@ function SanctuaryPlatform({
             </mesh>
             <mesh position={[0, height + 0.055, 0]} rotation={[0, angle * 0.5, 0]}>
               <octahedronGeometry args={[0.075, 0]} />
-              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={energy} roughness={0.35} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={glowEnabled ? energy : 0.04} roughness={0.35} />
             </mesh>
           </group>
         );
@@ -1135,6 +1163,7 @@ function Zone({
   visualStyle,
   selected,
   activityActive,
+  effects,
   onSelect,
 }: {
   module: ModuleHealth;
@@ -1143,17 +1172,24 @@ function Zone({
   visualStyle: "detailed" | "simple";
   selected: boolean;
   activityActive: boolean;
+  effects: ActiveVisualEffects;
   onSelect: () => void;
 }) {
   const color = STATUS_COLORS[module.health.status] ?? STATUS_COLORS.unknown;
   const sanctuaryStone = {
-    "seed-memory": "#707a5c", brain: "#756f7f", hooks: "#667c75", evolution: "#80765c",
+    "seed-memory": "#707a5c", "seed-core": "#7b715d", brain: "#756f7f", hooks: "#667c75", evolution: "#80765c",
     roles: "#6e7980", resources: "#5f7a78", receipts: "#747a6e",
   }[module.id] ?? "#6f746b";
   const organ = useRef<THREE.Group>(null);
   const reducedMotion = useReducedMotion();
+  useEffect(() => {
+    if (!organ.current || effects.motion) return;
+    organ.current.position.y = 0;
+    organ.current.rotation.y = 0;
+    organ.current.scale.setScalar(selected ? 1.42 : activityActive ? 1.12 : 1);
+  }, [activityActive, effects.motion, selected]);
   useFrame(({ clock }, delta) => {
-    if (!organ.current || reducedMotion) return;
+    if (!organ.current || reducedMotion || !effects.motion) return;
     organ.current.position.y = Math.sin(clock.elapsedTime * 0.72 + position[0]) * 0.055;
     organ.current.rotation.y = Math.sin(clock.elapsedTime * 0.38 + position[2]) * 0.045;
     const targetScale = selected ? 1.42 : activityActive ? 1.12 : 1;
@@ -1173,14 +1209,14 @@ function Zone({
         <meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
       </mesh>
       {visualStyle === "detailed" ? (
-        <SanctuaryPlatform color={color} stone={sanctuaryStone} selected={selected} activityActive={activityActive} />
+        <SanctuaryPlatform color={color} stone={sanctuaryStone} selected={selected} activityActive={activityActive} glowEnabled={effects.glow} />
       ) : (
         <mesh castShadow>
           <cylinderGeometry args={[0.78, 1.05, 0.55, 8]} />
           <meshPhysicalMaterial color="#4b8671" roughness={0.45} metalness={0.08} transparent opacity={0.86} />
         </mesh>
       )}
-      {visualStyle === "detailed" && <OrganSanctuary moduleId={module.id} color={color} activityActive={activityActive} />}
+      {visualStyle === "detailed" && <OrganSanctuary moduleId={module.id} color={color} activityActive={activityActive} glowEnabled={effects.glow} />}
       <group ref={organ}>
         <OrganGlyph moduleId={module.id} color={color} detailed={visualStyle === "detailed"} />
       </group>
@@ -1188,13 +1224,13 @@ function Zone({
         <ringGeometry args={[selected ? 0.82 : 0.7, selected ? 0.94 : 0.8, 32]} />
         <meshBasicMaterial color={color} transparent opacity={selected ? 0.96 : 0.42} />
       </mesh>
-      {selected && (
+      {effects.glow && selected && (
         <mesh position={[0, 0.4, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[1.02, 1.09, 40]} />
           <meshBasicMaterial color={color} transparent opacity={0.52} blending={THREE.AdditiveBlending} depthWrite={false} />
         </mesh>
       )}
-      {activityActive && !selected && (
+      {effects.glow && activityActive && !selected && (
         <mesh position={[0, 0.4, 0]} rotation={[-Math.PI / 2, 0, 0]}>
           <ringGeometry args={[0.92, 1.02, 40]} />
           <meshBasicMaterial color="#fff1a8" transparent opacity={0.66} blending={THREE.AdditiveBlending} depthWrite={false} />
@@ -1231,6 +1267,8 @@ function ConnectionArc({
   locale,
   visualStyle,
   activityActive,
+  flowEnabled,
+  glowEnabled,
 }: {
   connection: CanopyConnection;
   zonePositions: ZonePositionMap;
@@ -1238,6 +1276,8 @@ function ConnectionArc({
   locale: Locale;
   visualStyle: "detailed" | "simple";
   activityActive: boolean;
+  flowEnabled: boolean;
+  glowEnabled: boolean;
 }) {
   const curve = useMemo(() => connectionCurve(connection, zonePositions), [connection, zonePositions]);
   const color = STATUS_COLORS[connection.health.status] ?? STATUS_COLORS.unknown;
@@ -1263,6 +1303,7 @@ function ConnectionArc({
   const targetPosition = useMemo(() => curve.getPoint(1), [curve]);
 
   useFrame(({ clock }) => {
+    if (!flowEnabled) return;
     let absorption = 0;
     signals.current.forEach((signal, index) => {
       if (!signal) return;
@@ -1288,7 +1329,7 @@ function ConnectionArc({
         <meshStandardMaterial
           color={color}
           emissive={color}
-          emissiveIntensity={adjacent ? 0.72 : activityActive ? 0.66 : detailed ? 0.42 : 0.36}
+          emissiveIntensity={glowEnabled ? (adjacent ? 0.72 : activityActive ? 0.66 : detailed ? 0.42 : 0.36) : 0.05}
           transparent
           opacity={adjacent ? 0.78 : activityActive ? 0.68 : detailed ? 0.5 : 0.4}
           roughness={0.38}
@@ -1296,7 +1337,7 @@ function ConnectionArc({
           depthWrite={false}
         />
       </mesh>
-      <mesh renderOrder={5}>
+      {glowEnabled && <mesh renderOrder={5}>
         <tubeGeometry args={[curve, 56, glowRadius, 8, false]} />
         <meshBasicMaterial
           color={color}
@@ -1306,12 +1347,12 @@ function ConnectionArc({
           depthTest={false}
           depthWrite={false}
         />
-      </mesh>
+      </mesh>}
       <mesh position={arrow.position} quaternion={arrow.quaternion} renderOrder={7}>
         <coneGeometry args={[adjacent ? 0.115 : 0.08, adjacent ? 0.32 : 0.24, 8]} />
-        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={adjacent ? 1.1 : 0.55} transparent opacity={adjacent ? 0.94 : 0.58} depthTest={false} depthWrite={false} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={glowEnabled ? (adjacent ? 1.1 : 0.55) : 0.05} transparent opacity={adjacent ? 0.94 : 0.58} depthTest={false} depthWrite={false} />
       </mesh>
-      {Array.from({ length: detailed ? 3 : 2 }, (_, index) => (
+      {flowEnabled && Array.from({ length: detailed ? 3 : 2 }, (_, index) => (
         <group
           key={index}
           ref={(node) => { signals.current[index] = node; }}
@@ -1321,13 +1362,13 @@ function ConnectionArc({
             <sphereGeometry args={[adjacent ? 0.085 : 0.058, 12, 9]} />
             <meshBasicMaterial color="#f5fffb" transparent opacity={adjacent ? 1 : 0.82} blending={THREE.AdditiveBlending} depthTest={false} depthWrite={false} />
           </mesh>
-          <mesh renderOrder={7}>
+          {glowEnabled && <mesh renderOrder={7}>
             <sphereGeometry args={[adjacent ? 0.23 : 0.15, 12, 9]} />
             <meshBasicMaterial color={color} transparent opacity={adjacent ? 0.3 : 0.16} blending={THREE.AdditiveBlending} depthTest={false} depthWrite={false} />
-          </mesh>
+          </mesh>}
         </group>
       ))}
-      <mesh ref={arrival} position={targetPosition} scale={0.1}>
+      {flowEnabled && glowEnabled && <mesh ref={arrival} position={targetPosition} scale={0.1}>
         <sphereGeometry args={[adjacent ? 0.3 : 0.2, 16, 12]} />
         <meshBasicMaterial
           ref={arrivalMaterial}
@@ -1337,7 +1378,7 @@ function ConnectionArc({
           blending={THREE.AdditiveBlending}
           depthWrite={false}
         />
-      </mesh>
+      </mesh>}
       {adjacent && (
         <Html position={labelPosition} center distanceFactor={12} zIndexRange={[15, 0]}>
           <span className="flow-label" data-phase={connection.phase}>{t(locale, connection.label_key)}</span>
@@ -1354,9 +1395,11 @@ function ConnectionNetwork({
   locale,
   visualStyle,
   activeModuleIds,
+  effects,
 }: Pick<SceneProps, "connections" | "selectedModuleId" | "locale" | "activeModuleIds"> & {
   visualStyle: "detailed" | "simple";
   zonePositions: ZonePositionMap;
+  effects: ActiveVisualEffects;
 }) {
   return (
     <group>
@@ -1369,6 +1412,8 @@ function ConnectionNetwork({
           locale={locale}
           visualStyle={visualStyle}
           activityActive={activeModuleIds.includes(connection.source) || activeModuleIds.includes(connection.target)}
+          flowEnabled={effects.flow}
+          glowEnabled={effects.glow}
         />
       ))}
     </group>
@@ -1381,8 +1426,10 @@ function RootNetwork({
   onSelectCard,
   locale,
   visualStyle,
+  effects,
 }: Pick<SceneProps, "cards" | "selectedCardId" | "onSelectCard" | "locale"> & {
   visualStyle: "detailed" | "simple";
+  effects: ActiveVisualEffects;
 }) {
   const visibleCards = cards.filter((card) => card.lifecycle === "active").slice(0, 24);
   const branchCount = visualStyle === "detailed" ? 18 : 8;
@@ -1426,7 +1473,7 @@ function RootNetwork({
               onClick={(event) => selectFromPointer(event, () => onSelectCard(card.id))}
             >
               {visualStyle === "detailed" ? <dodecahedronGeometry args={[0.22, 0]} /> : <sphereGeometry args={[0.22, 12, 9]} />}
-              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={selected ? 1.5 : 0.55} />
+              <meshStandardMaterial color={color} emissive={color} emissiveIntensity={effects.glow ? (selected ? 1.5 : 0.55) : 0.05} />
             </mesh>
             {selected && (
               <Html position={[0, 0.62, 0]} center distanceFactor={8}>
@@ -1436,7 +1483,7 @@ function RootNetwork({
           </group>
         );
       })}
-      <Sparkles count={70} scale={[9, 1.4, 9]} size={1.5} speed={0.18} color="#ffd992" />
+      {effects.particles && <Sparkles count={70} scale={[9, 1.4, 9]} size={1.5} speed={0.18} color="#ffd992" />}
     </group>
   );
 }
@@ -1510,7 +1557,7 @@ function StructureGlyph({ node, module, selected }: { node: StructureNode; modul
   );
 }
 
-function StructureBranch({ start, end, index }: { start: THREE.Vector3; end: THREE.Vector3; index: number }) {
+function StructureBranch({ start, end, index, flowEnabled, glowEnabled }: { start: THREE.Vector3; end: THREE.Vector3; index: number; flowEnabled: boolean; glowEnabled: boolean }) {
   const curve = useMemo(() => {
     const midpoint = start.clone().lerp(end, 0.5);
     midpoint.y += 0.72 + (index % 3) * 0.16;
@@ -1519,7 +1566,7 @@ function StructureBranch({ start, end, index }: { start: THREE.Vector3; end: THR
   const signal = useRef<THREE.Mesh>(null);
   const reducedMotion = useReducedMotion();
   useFrame(({ clock }) => {
-    if (!signal.current) return;
+    if (!signal.current || !flowEnabled) return;
     const offset = reducedMotion ? 0.62 : (clock.elapsedTime * 0.12 + index * 0.17) % 1;
     curve.getPoint(offset, signal.current.position);
   });
@@ -1527,12 +1574,12 @@ function StructureBranch({ start, end, index }: { start: THREE.Vector3; end: THR
     <group>
       <mesh renderOrder={4}>
         <tubeGeometry args={[curve, 28, 0.035, 6, false]} />
-        <meshStandardMaterial color="#66dbae" emissive="#55d9a6" emissiveIntensity={0.72} transparent opacity={0.58} depthWrite={false} />
+        <meshStandardMaterial color="#66dbae" emissive="#55d9a6" emissiveIntensity={glowEnabled ? 0.72 : 0.05} transparent opacity={0.58} depthWrite={false} />
       </mesh>
-      <mesh ref={signal} renderOrder={7}>
+      {flowEnabled && <mesh ref={signal} renderOrder={7}>
         <sphereGeometry args={[0.075, 10, 8]} />
         <meshBasicMaterial color="#f5fff9" blending={THREE.AdditiveBlending} depthTest={false} />
-      </mesh>
+      </mesh>}
     </group>
   );
 }
@@ -1543,12 +1590,14 @@ function StructureNetwork({
   selectedId,
   locale,
   onSelect,
+  effects,
 }: {
   structure: CanopyStructure;
   modules: ModuleHealth[];
   selectedId: string;
   locale: Locale;
   onSelect: (nodeId: string) => void;
+  effects: ActiveVisualEffects;
 }) {
   const selected = structure.nodes.find((node) => node.id === selectedId) ?? structure.nodes.find((node) => node.id === structure.root_id);
   const children = selected ? structure.nodes.filter((node) => node.parent_id === selected.id) : [];
@@ -1586,7 +1635,7 @@ function StructureNetwork({
         const position = childPositions[index];
         return (
           <group key={node.id}>
-            <StructureBranch start={center} end={position} index={index} />
+            <StructureBranch start={center} end={position} index={index} flowEnabled={effects.flow} glowEnabled={effects.glow} />
             <group
               position={position}
               scale={node.kind === "component" ? 0.72 : 0.82}
@@ -1610,7 +1659,7 @@ function StructureNetwork({
           <span className="structure-overflow">+{children.length - visible.length}</span>
         </Html>
       )}
-      <Sparkles count={45} scale={[12, 4, 12]} size={1.4} speed={0.16} color="#8debc3" />
+      {effects.particles && <Sparkles count={45} scale={[12, 4, 12]} size={1.4} speed={0.16} color="#8debc3" />}
     </group>
   );
 }
@@ -1619,11 +1668,24 @@ function World(props: SceneProps) {
   const visualStyle = props.backgroundMode === "detailed" ? "detailed" : "simple";
   const detailedWorld = props.backgroundMode === "detailed";
   const reducedMotion = useReducedMotion();
+  const effects = useMemo<ActiveVisualEffects>(() => ({
+    particles: props.visualEffects.master && props.visualEffects.particles,
+    flow: props.visualEffects.master && props.visualEffects.flow,
+    clouds: props.visualEffects.master && props.visualEffects.clouds,
+    glow: props.visualEffects.master && props.visualEffects.glow,
+    motion: props.visualEffects.master && props.visualEffects.motion,
+  }), [props.visualEffects]);
+  const idleAnimationActive = !reducedMotion && (effects.particles || effects.flow || effects.motion);
   const zonePositions = useMemo(() => buildZonePositions(props.modules), [props.modules]);
-  const { size } = useThree();
+  const { gl, setDpr, size } = useThree();
   const narrowViewport = size.width / Math.max(size.height, 1) < 0.72;
+  const restingDpr = Math.min(
+    window.devicePixelRatio || 1,
+    idleAnimationActive ? (detailedWorld ? 1.25 : 1.15) : (detailedWorld ? 1.55 : 1.35),
+  );
   const shadowRevision = [
     props.backgroundMode,
+    effects.glow ? "glow" : "no-glow",
     props.view,
     props.selectedModuleId,
     props.selectedCardId,
@@ -1631,8 +1693,67 @@ function World(props: SceneProps) {
     Math.round(props.growthProgress * 100),
   ].join(":");
   const controlsRef = useRef<OrbitControlsImpl>(null);
+  const effectDistance = useRef<EffectDistance>("far");
+  const dprRestoreTimer = useRef<number | undefined>(undefined);
+  const initialDprSync = useRef(true);
   const interactionOrigin = useRef<{ camera: THREE.Vector3; target: THREE.Vector3 } | null>(null);
   const interactionClosedPanel = useRef(false);
+  useEffect(() => {
+    window.clearTimeout(dprRestoreTimer.current);
+    if (initialDprSync.current) {
+      initialDprSync.current = false;
+      setDpr(restingDpr);
+      return () => window.clearTimeout(dprRestoreTimer.current);
+    }
+    // Canvas initializes the new world at its upper DPR bound. Applying the
+    // animation budget on the following frame makes the lower moving-scene
+    // density reliable even when local preferences change across a reload.
+    const syncFrame = window.requestAnimationFrame(() => setDpr(restingDpr));
+    return () => {
+      window.cancelAnimationFrame(syncFrame);
+      window.clearTimeout(dprRestoreTimer.current);
+    };
+  }, [restingDpr, setDpr]);
+  useEffect(() => {
+    const surface = gl.domElement;
+    const lowerDpr = () => {
+      window.clearTimeout(dprRestoreTimer.current);
+      setDpr(1);
+    };
+    const restoreDpr = () => {
+      window.clearTimeout(dprRestoreTimer.current);
+      dprRestoreTimer.current = window.setTimeout(() => setDpr(restingDpr), 180);
+    };
+    const lowerForWheel = () => {
+      lowerDpr();
+      restoreDpr();
+    };
+    surface.addEventListener("pointerdown", lowerDpr, { passive: true });
+    surface.addEventListener("pointercancel", restoreDpr, { passive: true });
+    surface.addEventListener("wheel", lowerForWheel, { passive: true });
+    window.addEventListener("pointerup", restoreDpr, { passive: true });
+    return () => {
+      surface.removeEventListener("pointerdown", lowerDpr);
+      surface.removeEventListener("pointercancel", restoreDpr);
+      surface.removeEventListener("wheel", lowerForWheel);
+      window.removeEventListener("pointerup", restoreDpr);
+      window.clearTimeout(dprRestoreTimer.current);
+    };
+  }, [gl, restingDpr, setDpr]);
+  useFrame(({ camera }) => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    const distance = camera.position.distanceTo(controls.target);
+    const current = effectDistance.current;
+    // Separate enter/leave thresholds prevent a wheel resting on the boundary
+    // from rapidly swapping the near and far effects.
+    const next = current === "near"
+      ? (distance >= 13 ? "far" : "near")
+      : (distance <= 11 ? "near" : "far");
+    if (next === current) return;
+    effectDistance.current = next;
+    props.onEffectDistanceChange(next);
+  });
   function beginSceneInteraction() {
     const controls = controlsRef.current;
     if (!controls) return;
@@ -1641,6 +1762,8 @@ function World(props: SceneProps) {
       target: controls.target.clone(),
     };
     interactionClosedPanel.current = false;
+    window.clearTimeout(dprRestoreTimer.current);
+    setDpr(1);
   }
   function observeSceneInteraction() {
     const controls = controlsRef.current;
@@ -1655,10 +1778,12 @@ function World(props: SceneProps) {
   }
   function endSceneInteraction() {
     interactionOrigin.current = null;
+    window.clearTimeout(dprRestoreTimer.current);
+    dprRestoreTimer.current = window.setTimeout(() => setDpr(restingDpr), 180);
   }
   return (
     <>
-      <SceneRenderBudget shadowRevision={shadowRevision} />
+      <SceneRenderBudget shadowRevision={shadowRevision} active={idleAnimationActive} />
       <fog attach="fog" args={[detailedWorld ? "#426756" : "#bfe4d5", narrowViewport ? 50 : detailedWorld ? 30 : 22, narrowViewport ? 80 : detailedWorld ? 58 : 42]} />
       <ambientLight intensity={detailedWorld ? 0.58 : 0.86} />
       <hemisphereLight args={[detailedWorld ? "#d9f2e8" : "#d9f8ff", detailedWorld ? "#183f30" : "#22543d", detailedWorld ? 0.96 : 1.45]} />
@@ -1673,10 +1798,10 @@ function World(props: SceneProps) {
       {props.backgroundMode !== "none" && props.view !== "structure" && (
         <>
           {props.backgroundMode === "detailed" && <Ground />}
-          {props.backgroundMode === "detailed" && <AncientRuins />}
+          {props.backgroundMode === "detailed" && <AncientRuins glowEnabled={effects.glow} />}
           <Dome visualStyle={visualStyle} locale={props.locale} onSelect={() => props.onSelectStructure("canopy-shell")} />
-          <Tree visualStyle={visualStyle} locale={props.locale} growthProgress={props.growthProgress} onSelect={() => props.onSelectStructure("growth-tree")} />
-          {props.backgroundMode === "detailed" && (
+          <Tree visualStyle={visualStyle} locale={props.locale} growthProgress={props.growthProgress} effects={effects} onSelect={() => props.onSelectStructure("growth-tree")} />
+          {props.backgroundMode === "detailed" && effects.glow && (
             <group position={[0, 5.05, -0.2]}>
               <mesh>
                 <icosahedronGeometry args={[0.5, 2]} />
@@ -1689,18 +1814,18 @@ function World(props: SceneProps) {
               <pointLight color="#ffd36b" intensity={12} distance={8} />
             </group>
           )}
-          <Sparkles
+          {effects.particles && <Sparkles
             count={detailedWorld ? 58 : 18}
             position={[0, 6.4, -1.5]}
             scale={detailedWorld ? [19, 11, 19] : [13, 7, 13]}
             size={detailedWorld ? 1.05 : 1.2}
             speed={reducedMotion ? 0 : detailedWorld ? 0.07 : 0.04}
             color="#fff1b8"
-          />
+          />}
         </>
       )}
       {props.view === "overview" && (
-        <>{props.backgroundMode === "detailed" && <RootPaths activeModuleIds={props.activeModuleIds} zonePositions={zonePositions} />}</>
+        <>{props.backgroundMode === "detailed" && <RootPaths activeModuleIds={props.activeModuleIds} zonePositions={zonePositions} glowEnabled={effects.glow} />}</>
       )}
       {props.view === "overview" && (
         <ConnectionNetwork
@@ -1710,6 +1835,7 @@ function World(props: SceneProps) {
           locale={props.locale}
           visualStyle={visualStyle}
           activeModuleIds={props.activeModuleIds}
+          effects={effects}
         />
       )}
       {props.view === "overview" && props.modules.map((module) => (
@@ -1721,6 +1847,7 @@ function World(props: SceneProps) {
           visualStyle={visualStyle}
           selected={module.id === props.selectedModuleId}
           activityActive={props.activeModuleIds.includes(module.id)}
+          effects={effects}
           onSelect={() => props.onSelectModule(module.id)}
         />
       ))}
@@ -1731,6 +1858,7 @@ function World(props: SceneProps) {
           onSelectCard={props.onSelectCard}
           locale={props.locale}
           visualStyle={visualStyle}
+          effects={effects}
         />
       )}
       {props.view === "structure" && props.structure && (
@@ -1740,13 +1868,14 @@ function World(props: SceneProps) {
           selectedId={props.selectedStructureId}
           locale={props.locale}
           onSelect={props.onSelectStructure}
+          effects={effects}
         />
       )}
       <OrbitControls
         ref={controlsRef}
         enablePan
         screenSpacePanning
-        enableDamping
+        enableDamping={idleAnimationActive}
         dampingFactor={0.08}
         zoomSpeed={0.8}
         minDistance={4.8}
@@ -1763,14 +1892,24 @@ function World(props: SceneProps) {
 }
 
 export function CanopyScene(props: SceneProps) {
+  const canvasAnimationActive = props.visualEffects.master && (
+    props.visualEffects.particles
+    || props.visualEffects.flow
+    || props.visualEffects.motion
+  );
+  const maximumDpr = canvasAnimationActive
+    ? (props.backgroundMode === "detailed" ? 1.25 : 1.15)
+    : (props.backgroundMode === "detailed" ? 1.55 : 1.35);
   return (
     <Canvas
       className="canopy-canvas"
-      data-render-policy="adaptive-idle-30"
+      data-render-policy={canvasAnimationActive ? "adaptive-idle-12" : "interaction-only"}
+      data-animation-budget-fps={canvasAnimationActive ? "12" : "0"}
       data-shadow-policy="state-driven"
+      data-interaction-dpr-policy="temporary-1x"
       frameloop="demand"
       shadows
-      dpr={[1, 1.65]}
+      dpr={[1, maximumDpr]}
       camera={{ position: [0, 8.4, 18.8], fov: 43, near: 0.1, far: 80 }}
       gl={{ antialias: true, powerPreference: "default", alpha: true }}
       events={(state) => ({

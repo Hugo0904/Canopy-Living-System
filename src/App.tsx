@@ -8,6 +8,7 @@ import {
   CircleHelp,
   ChevronRight,
   Database,
+  Dna,
   FileCode2,
   FolderTree,
   GitBranch,
@@ -31,7 +32,7 @@ import {
 } from "lucide-react";
 import { fetchLifeEvents, fetchSnapshot, syncSnapshot } from "./api";
 import { AmbientBgm, ambientTrackInfo, playUiClick, type AmbientTrackId } from "./audio/ambientBgm";
-import { CanopyScene } from "./components/CanopyScene";
+import { CanopyScene, type EffectDistance, type VisualEffects } from "./components/CanopyScene";
 import { ActivityTimeline } from "./components/ActivityTimeline";
 import { LifeStreamPanel } from "./components/LifeStreamPanel";
 import { TreatmentComposer } from "./components/TreatmentComposer";
@@ -57,6 +58,8 @@ import type { ActivityEvent, ActivityProjection, CanopyConnection, CanopySnapsho
 
 type BackgroundMode = "detailed" | "simple" | "none";
 type ObservatoryView = "overview" | "seed" | "structure" | "timeline";
+type SettingsTab = "general" | "effects";
+type VisualEffectKey = Exclude<keyof VisualEffects, "master">;
 
 interface StructureNavigationState {
   scope: "overview" | "inside";
@@ -74,6 +77,7 @@ interface PendingTreatment {
 
 const MODULE_ICONS: Record<string, typeof BrainCircuit> = {
   "seed-memory": Sprout,
+  "seed-core": Dna,
   brain: BrainCircuit,
   hooks: ShieldCheck,
   evolution: Sparkles,
@@ -84,6 +88,7 @@ const MODULE_ICONS: Record<string, typeof BrainCircuit> = {
 
 const LOCALES: Locale[] = ["zh-TW", "zh-CN", "en"];
 const BACKGROUNDS: BackgroundMode[] = ["detailed", "simple", "none"];
+const VISUAL_EFFECT_KEYS: VisualEffectKey[] = ["particles", "flow", "clouds", "glow", "motion"];
 const MUSIC_TRACKS: AmbientTrackId[] = [
   "sacred-grove",
   "resonant-chimes",
@@ -134,6 +139,26 @@ function storedVolume(key: string, fallback: number): number {
   if (raw === null) return fallback;
   const stored = Number(raw);
   return Number.isFinite(stored) && stored >= 0 && stored <= 1 ? stored : fallback;
+}
+
+function storedToggle(key: string, fallback: boolean): boolean {
+  const raw = window.localStorage.getItem(key);
+  if (raw === "on") return true;
+  if (raw === "off") return false;
+  return fallback;
+}
+
+function storedVisualEffects(): VisualEffects {
+  return {
+    // New browsers and development sessions start quiet. Individual choices
+    // remain ready so enabling the master restores the full scene in one step.
+    master: storedToggle("canopy.effects.master", false),
+    particles: storedToggle("canopy.effects.particles", true),
+    flow: storedToggle("canopy.effects.flow", true),
+    clouds: storedToggle("canopy.effects.clouds", true),
+    glow: storedToggle("canopy.effects.glow", true),
+    motion: storedToggle("canopy.effects.motion", true),
+  };
 }
 
 function MetricValue({ value, locale }: { value: unknown; locale: Locale }) {
@@ -449,12 +474,15 @@ function SettingsPanel({
   musicVolume,
   soundEffects,
   soundEffectVolume,
+  visualEffects,
+  effectDistance,
   onLocale,
   onBackground,
   onMusic,
   onMusicVolume,
   onSoundEffects,
   onSoundEffectVolume,
+  onVisualEffects,
   onClose,
 }: {
   locale: Locale;
@@ -463,22 +491,52 @@ function SettingsPanel({
   musicVolume: number;
   soundEffects: boolean;
   soundEffectVolume: number;
+  visualEffects: VisualEffects;
+  effectDistance: EffectDistance;
   onLocale: (value: Locale) => void;
   onBackground: (value: BackgroundMode) => void;
   onMusic: (value: AmbientTrackId) => void;
   onMusicVolume: (value: number) => void;
   onSoundEffects: (value: boolean) => void;
   onSoundEffectVolume: (value: number) => void;
+  onVisualEffects: (value: VisualEffects) => void;
   onClose: () => void;
 }) {
+  const [tab, setTab] = useState<SettingsTab>("general");
   const trackInfo = ambientTrackInfo(musicTrack);
+  const masterEnabled = visualEffects.master;
+  function toggleVisualEffect(key: VisualEffectKey) {
+    if (!masterEnabled) {
+      const isolated: VisualEffects = {
+        master: true,
+        particles: false,
+        flow: false,
+        clouds: false,
+        glow: false,
+        motion: false,
+      };
+      isolated[key] = true;
+      onVisualEffects(isolated);
+      return;
+    }
+    onVisualEffects({ ...visualEffects, [key]: !visualEffects[key] });
+  }
   return (
     <section className="settings-panel" aria-label={t(locale, "settings.title")}>
       <header>
         <div><Settings2 size={17} /><strong>{t(locale, "settings.title")}</strong></div>
         <button className="icon-button" onClick={onClose} aria-label={t(locale, "settings.close")}><X size={17} /></button>
       </header>
-      <div className="settings-group">
+      <div className="settings-tabs" role="tablist" aria-label={t(locale, "settings.sections")}>
+        <button role="tab" aria-selected={tab === "general"} className={tab === "general" ? "is-active" : ""} onClick={() => setTab("general")}>
+          <Settings2 size={15} />{t(locale, "settings.tab_general")}
+        </button>
+        <button role="tab" aria-selected={tab === "effects"} className={tab === "effects" ? "is-active" : ""} onClick={() => setTab("effects")}>
+          <Sparkles size={15} />{t(locale, "settings.tab_effects")}
+        </button>
+      </div>
+      {tab === "general" ? <>
+        <div className="settings-group">
         <span>{t(locale, "settings.language")}</span>
         <div className="settings-segments" data-testid="language-settings">
           {LOCALES.map((value) => (
@@ -487,8 +545,8 @@ function SettingsPanel({
             </button>
           ))}
         </div>
-      </div>
-      <div className="settings-group">
+        </div>
+        <div className="settings-group">
         <span>{t(locale, "settings.background")}</span>
         <div className="settings-segments" data-testid="background-settings">
           {BACKGROUNDS.map((value) => (
@@ -497,8 +555,8 @@ function SettingsPanel({
             </button>
           ))}
         </div>
-      </div>
-      <div className="settings-group">
+        </div>
+        <div className="settings-group">
         <span>{t(locale, "settings.music")}</span>
         <div className="settings-segments music-options" data-testid="music-settings">
           {MUSIC_TRACKS.map((value) => (
@@ -525,8 +583,8 @@ function SettingsPanel({
           <a href={trackInfo.sourceUrl} target="_blank" rel="noreferrer">{trackInfo.title} · {trackInfo.artist}</a>
           <a href={trackInfo.licenseUrl} target="_blank" rel="noreferrer">{trackInfo.license}</a>
         </p>
-      </div>
-      <div className="settings-group">
+        </div>
+        <div className="settings-group">
         <span>{t(locale, "settings.sound_effects")}</span>
         <div className="settings-segments two-options">
           {[true, false].map((value) => (
@@ -548,7 +606,54 @@ function SettingsPanel({
           />
           <output>{Math.round(soundEffectVolume * 100)}%</output>
         </label>
-      </div>
+        </div>
+      </> : (
+        <div className="effects-settings" data-testid="effects-settings">
+          <div className="effect-master-row" data-enabled={masterEnabled ? "true" : "false"}>
+            <div>
+              <strong>{t(locale, "settings.effects_master")}</strong>
+              <small>{t(locale, "settings.effects_master_detail")}</small>
+            </div>
+            <button
+              className="settings-switch"
+              role="switch"
+              aria-label={t(locale, "settings.effects_master")}
+              aria-checked={masterEnabled}
+              data-enabled={masterEnabled ? "true" : "false"}
+              onClick={() => onVisualEffects({ ...visualEffects, master: !masterEnabled })}
+            >
+              {t(locale, masterEnabled ? "settings.effects_on" : "settings.effects_off")}
+            </button>
+          </div>
+          <p className="effects-performance-note" data-enabled={masterEnabled ? "true" : "false"}>
+            {t(locale, masterEnabled ? "settings.effects_active_note" : "settings.effects_paused_note")}
+            {masterEnabled && <span>{t(locale, `settings.effects_distance_${effectDistance}`)}</span>}
+          </p>
+          <div className="effect-list">
+            {VISUAL_EFFECT_KEYS.map((key) => {
+              const enabled = masterEnabled && visualEffects[key];
+              return (
+                <div className="effect-row" key={key} data-enabled={enabled ? "true" : "false"}>
+                  <div>
+                    <strong>{t(locale, `settings.effect_${key}`)}</strong>
+                    <small>{t(locale, `settings.effect_${key}_detail`)}</small>
+                  </div>
+                  <button
+                    className="settings-switch"
+                    role="switch"
+                    aria-label={t(locale, `settings.effect_${key}`)}
+                    aria-checked={enabled}
+                    data-enabled={enabled ? "true" : "false"}
+                    onClick={() => toggleVisualEffect(key)}
+                  >
+                    {t(locale, enabled ? "settings.effects_on" : "settings.effects_off")}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -560,6 +665,8 @@ export default function App() {
   const [musicVolume, setMusicVolume] = useState(() => storedVolume("canopy.music.volume", 0.88));
   const [soundEffects, setSoundEffects] = useState(() => window.localStorage.getItem("canopy.sfx") !== "off");
   const [soundEffectVolume, setSoundEffectVolume] = useState(() => storedVolume("canopy.sfx.volume", 0.72));
+  const [visualEffects, setVisualEffects] = useState<VisualEffects>(storedVisualEffects);
+  const [effectDistance, setEffectDistance] = useState<EffectDistance>("far");
   const [bgmEnabled, setBgmEnabled] = useState(() => window.localStorage.getItem("canopy.bgm") !== "off");
   const [bgmActive, setBgmActive] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -603,6 +710,13 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem("canopy.background", backgroundMode);
   }, [backgroundMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem("canopy.effects.master", visualEffects.master ? "on" : "off");
+    VISUAL_EFFECT_KEYS.forEach((key) => {
+      window.localStorage.setItem(`canopy.effects.${key}`, visualEffects[key] ? "on" : "off");
+    });
+  }, [visualEffects]);
 
   useEffect(() => {
     window.localStorage.setItem("canopy.life-stream", lifeStreamOpen ? "open" : "closed");
@@ -815,6 +929,11 @@ export default function App() {
   const activityDays = snapshot?.activity?.daily ?? [];
   const selectedActivityDay = activityDays.find((day) => day.date === selectedActivityDate);
   const activeModuleIds = selectedActivityDay?.active_modules ?? [];
+  const appliedVisualEffects = useMemo<VisualEffects>(() => ({
+    ...visualEffects,
+    particles: visualEffects.particles && effectDistance === "near",
+    clouds: visualEffects.clouds && effectDistance === "far",
+  }), [effectDistance, visualEffects]);
   const selectedActivityIndex = activityDays.findIndex((day) => day.date === selectedActivityDate);
   const growthProgress = activityDays.length
     ? Math.max(0.72, (selectedActivityIndex + 1) / activityDays.length)
@@ -946,6 +1065,15 @@ export default function App() {
       data-settings={settingsOpen ? "open" : "closed"}
       data-life-stream={lifeStreamOpen ? "open" : "closed"}
       data-detail={detailOpen ? "open" : "closed"}
+      data-effects={visualEffects.master ? "on" : "off"}
+      data-effect-distance={effectDistance}
+      data-effect-particles={appliedVisualEffects.master && appliedVisualEffects.particles ? "on" : "off"}
+      data-effect-flow={appliedVisualEffects.master && appliedVisualEffects.flow ? "on" : "off"}
+      data-effect-clouds={appliedVisualEffects.master && appliedVisualEffects.clouds ? "on" : "off"}
+      data-effect-glow={appliedVisualEffects.master && appliedVisualEffects.glow ? "on" : "off"}
+      data-effect-motion={appliedVisualEffects.master && appliedVisualEffects.motion ? "on" : "off"}
+      data-effect-particles-preference={visualEffects.particles ? "on" : "off"}
+      data-effect-clouds-preference={visualEffects.clouds ? "on" : "off"}
       lang={locale}
     >
       <div
@@ -962,6 +1090,7 @@ export default function App() {
           structure={snapshot.structure}
           locale={locale}
           backgroundMode={backgroundMode}
+          visualEffects={appliedVisualEffects}
           view={view === "timeline" ? "overview" : view}
           selectedModuleId={selectedModuleId}
           selectedCardId={selectedCardId}
@@ -976,6 +1105,7 @@ export default function App() {
             setDetailOpen(false);
             setLifeStreamOpen(false);
           }}
+          onEffectDistanceChange={setEffectDistance}
         />
       </div>
 
@@ -1002,12 +1132,15 @@ export default function App() {
           musicVolume={musicVolume}
           soundEffects={soundEffects}
           soundEffectVolume={soundEffectVolume}
+          visualEffects={visualEffects}
+          effectDistance={effectDistance}
           onLocale={setLocale}
           onBackground={setBackgroundMode}
           onMusic={setMusicTrack}
           onMusicVolume={setMusicVolume}
           onSoundEffects={setSoundEffects}
           onSoundEffectVolume={setSoundEffectVolume}
+          onVisualEffects={setVisualEffects}
           onClose={() => setSettingsOpen(false)}
         />
       )}

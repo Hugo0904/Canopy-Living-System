@@ -8,6 +8,7 @@ export type ZonePositionMap = Record<string, ZonePosition>;
 // placed automatically instead of sharing a hard-coded fallback coordinate.
 const KNOWN_ZONE_POSITIONS: ZonePositionMap = {
   "seed-memory": [-5.4, 0.2, 2.8],
+  "seed-core": [-4.65, 0.45, 5.35],
   brain: [-1.8, 0.75, 5.15],
   roles: [-5.25, 0.2, -2.85],
   hooks: [1.35, 0.25, 3.0],

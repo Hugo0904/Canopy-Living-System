@@ -58,7 +58,19 @@ async function pointerClick(page, locator) {
 async function cloudLayerStyle(page) {
   return page.locator(".app-shell").evaluate((element) => {
     const style = getComputedStyle(element, "::before");
-    return { animationName: style.animationName, opacity: Number(style.opacity) };
+    const matrixValues = style.transform === "none"
+      ? []
+      : style.transform.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi)?.map(Number) ?? [];
+    const is3d = style.transform.startsWith("matrix3d");
+    return {
+      animationName: style.animationName,
+      backgroundImage: style.backgroundImage,
+      opacity: Number(style.opacity),
+      transform: style.transform,
+      translateX: is3d ? matrixValues[12] ?? 0 : matrixValues[4] ?? 0,
+      translateY: is3d ? matrixValues[13] ?? 0 : matrixValues[5] ?? 0,
+      reducedMotion: matchMedia("(prefers-reduced-motion: reduce)").matches,
+    };
   });
 }
 
@@ -100,24 +112,84 @@ async function installWebglCounter(page) {
 
 async function verifyRenderBudget(page) {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await prepare(page, { background: "detailed" });
-  const sampleMs = 3000;
-  const counterReady = await page.evaluate(() => {
-    const counter = globalThis.__canopyWebglCounter;
-    if (!counter) return false;
-    counter.clears = 0;
-    counter.draws = 0;
-    return true;
-  });
-  await page.waitForTimeout(sampleMs);
-  const counter = await page.evaluate(() => ({ ...globalThis.__canopyWebglCounter }));
-  const idleClearRate = counter.clears * 1000 / sampleMs;
-  const drawCallRate = counter.draws * 1000 / sampleMs;
+  const sample = async (sampleMs) => {
+    const counterReady = await page.evaluate(() => {
+      const counter = globalThis.__canopyWebglCounter;
+      if (!counter) return false;
+      counter.clears = 0;
+      counter.draws = 0;
+      return true;
+    });
+    await page.waitForTimeout(sampleMs);
+    const counter = await page.evaluate(() => ({ ...globalThis.__canopyWebglCounter }));
+    return {
+      sampleMs,
+      counterReady,
+      clearCalls: counter.clears,
+      drawCalls: counter.draws,
+      clearRate: counter.clears * 1000 / sampleMs,
+      drawCallRate: counter.draws * 1000 / sampleMs,
+    };
+  };
   const failures = [];
-  if (!counterReady) failures.push("WebGL render counter could not be installed");
-  if (idleClearRate > 42) failures.push(`idle WebGL redraw rate remained too high: ${idleClearRate.toFixed(1)}/s`);
-  if (idleClearRate < 20) failures.push(`idle WebGL animation redraw rate was too low: ${idleClearRate.toFixed(1)}/s`);
-  return { sampleMs, clearCalls: counter.clears, drawCalls: counter.draws, idleClearRate, drawCallRate, failures };
+  await prepare(page, { background: "detailed", effects: "off" });
+  const inactive = await sample(2400);
+  const inactivePolicy = await page.locator("[data-render-policy]").getAttribute("data-render-policy");
+  if (!inactive.counterReady) failures.push("WebGL render counter could not be installed");
+  if (inactivePolicy !== "interaction-only") failures.push(`effects-off render policy was ${inactivePolicy}`);
+  if (inactive.clearRate > 6) failures.push(`effects-off scene kept redrawing at ${inactive.clearRate.toFixed(1)}/s`);
+
+  await prepare(page, { background: "detailed", effects: "on", enabledEffects: ["clouds"] });
+  const cloudOnly = await sample(2400);
+  const cloudOnlyFarState = await page.locator(".app-shell").evaluate((element) => ({
+    distance: element.getAttribute("data-effect-distance"),
+    particles: element.getAttribute("data-effect-particles"),
+    clouds: element.getAttribute("data-effect-clouds"),
+  }));
+  const cloudOnlyPolicy = await page.locator("[data-render-policy]").getAttribute("data-render-policy");
+  if (cloudOnlyPolicy !== "interaction-only") failures.push(`cloud-only render policy was ${cloudOnlyPolicy}`);
+  if (cloudOnly.clearRate > 6) failures.push(`CSS cloud effect woke the 3D redraw loop at ${cloudOnly.clearRate.toFixed(1)}/s`);
+  if (cloudOnlyFarState.distance !== "far" || cloudOnlyFarState.clouds !== "on" || cloudOnlyFarState.particles !== "off") {
+    failures.push(`far adaptive effects were ${JSON.stringify(cloudOnlyFarState)}`);
+  }
+  await page.getByRole("button", { name: "Seed 大腦", exact: true }).evaluate((element) => element.click());
+  await page.waitForFunction(() => document.querySelector(".app-shell")?.getAttribute("data-effect-distance") === "near");
+  const cloudOnlyNearState = await page.locator(".app-shell").evaluate((element) => ({
+    distance: element.getAttribute("data-effect-distance"),
+    particles: element.getAttribute("data-effect-particles"),
+    clouds: element.getAttribute("data-effect-clouds"),
+  }));
+  if (cloudOnlyNearState.clouds !== "off") failures.push(`near view retained clouds: ${JSON.stringify(cloudOnlyNearState)}`);
+
+  await prepare(page, { background: "detailed", effects: "on", enabledEffects: ["particles"] });
+  const particleFarState = await page.locator(".app-shell").getAttribute("data-effect-particles");
+  if (particleFarState !== "off") failures.push("far view retained floating motes");
+  await page.getByRole("button", { name: "Seed 大腦", exact: true }).evaluate((element) => element.click());
+  await page.waitForFunction(() => document.querySelector(".app-shell")?.getAttribute("data-effect-distance") === "near");
+  await page.waitForTimeout(900);
+  const particlesOnly = await sample(2400);
+  const particlesOnlyPolicy = await page.locator("[data-render-policy]").getAttribute("data-render-policy");
+  const particlesOnlyBudget = await page.locator("[data-render-policy]").getAttribute("data-animation-budget-fps");
+  const particleBufferWidth = await page.locator("canvas").evaluate((element) => element.width);
+  if (particlesOnlyPolicy !== "adaptive-idle-12") failures.push(`particle-only render policy was ${particlesOnlyPolicy}`);
+  if (particlesOnlyBudget !== "12") failures.push(`particle-only animation budget was ${particlesOnlyBudget}fps`);
+  if ((await page.locator(".app-shell").getAttribute("data-effect-particles")) !== "on") failures.push("near view did not enable floating motes");
+  // A rendered frame can clear multiple WebGL buffers. At a 12fps scheduling
+  // budget, this scene currently produces up to three clear calls per frame.
+  if (particlesOnly.clearRate > 42 || particlesOnly.clearRate < 6) failures.push(`particle-only render activity was ${particlesOnly.clearRate.toFixed(1)} clears/s`);
+  if (particleBufferWidth > 1810) failures.push(`particle-only detailed buffer stayed too dense at ${particleBufferWidth}px`);
+
+  await prepare(page, { background: "detailed", effects: "on" });
+  const active = await sample(3000);
+  const activePolicy = await page.locator("[data-render-policy]").getAttribute("data-render-policy");
+  if (activePolicy !== "adaptive-idle-12") failures.push(`effects-on render policy was ${activePolicy}`);
+  if (active.clearRate > 18) failures.push(`effects-on redraw rate remained too high: ${active.clearRate.toFixed(1)}/s`);
+  if (active.clearRate < 6) failures.push(`effects-on animation redraw rate was too low: ${active.clearRate.toFixed(1)}/s`);
+
+  await prepare(page, { background: "detailed", effects: "off" });
+  const inactiveAgain = await sample(2400);
+  if (inactiveAgain.clearRate > 6) failures.push(`effects-off redraw loop accumulated after toggling: ${inactiveAgain.clearRate.toFixed(1)}/s`);
+  return { inactive, cloudOnly, cloudOnlyFarState, cloudOnlyNearState, particlesOnly, particlesOnlyBudget, particleBufferWidth, active, inactiveAgain, failures };
 }
 
 async function clickOrganBody(page, name, viewportWidth) {
@@ -131,11 +203,11 @@ async function clickOrganBody(page, name, viewportWidth) {
   );
 }
 
-async function prepare(page, { locale = "zh-TW", background = "detailed", lifeStream = "closed" } = {}) {
+async function prepare(page, { locale = "zh-TW", background = "detailed", lifeStream = "closed", effects = "off", enabledEffects = null } = {}) {
   if (!page.url().startsWith(baseUrl)) {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
   }
-  await page.evaluate(({ localeValue, backgroundValue, lifeStreamValue }) => {
+  await page.evaluate(({ localeValue, backgroundValue, lifeStreamValue, effectsValue, enabledEffectValues }) => {
     localStorage.setItem("canopy.locale", localeValue);
     localStorage.setItem("canopy.background", backgroundValue);
     localStorage.setItem("canopy.music", "greenhouse");
@@ -143,7 +215,11 @@ async function prepare(page, { locale = "zh-TW", background = "detailed", lifeSt
     localStorage.setItem("canopy.bgm", "on");
     localStorage.setItem("canopy.sfx", "on");
     localStorage.setItem("canopy.life-stream", lifeStreamValue);
-  }, { localeValue: locale, backgroundValue: background, lifeStreamValue: lifeStream });
+    localStorage.setItem("canopy.effects.master", effectsValue);
+    ["particles", "flow", "clouds", "glow", "motion"].forEach((key) => {
+      localStorage.setItem(`canopy.effects.${key}`, !enabledEffectValues || enabledEffectValues.includes(key) ? "on" : "off");
+    });
+  }, { localeValue: locale, backgroundValue: background, lifeStreamValue: lifeStream, effectsValue: effects, enabledEffectValues: enabledEffects });
   await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 });
   try {
     await page.locator("canvas").waitFor({ state: "visible", timeout: 60000 });
@@ -192,10 +268,22 @@ async function verifyZoomPersistence(page) {
   const settled = await label.boundingBox();
   const zoomDelta = rectDelta(before, zoomed);
   const settleDrift = rectDelta(zoomed, settled);
+  const restingBufferWidth = await canvas.evaluate((element) => element.width);
+  const dragPoint = { x: canvasBox.x + canvasBox.width * 0.58, y: canvasBox.y + canvasBox.height * 0.55 };
+  await page.mouse.move(dragPoint.x, dragPoint.y);
+  await page.mouse.down();
+  await page.mouse.move(dragPoint.x + 70, dragPoint.y + 4, { steps: 5 });
+  await page.waitForTimeout(80);
+  const interactionBufferWidth = await canvas.evaluate((element) => element.width);
+  await page.mouse.up();
+  await page.waitForTimeout(320);
+  const restoredBufferWidth = await canvas.evaluate((element) => element.width);
   const failures = [];
   if (zoomDelta < 8) failures.push("wheel zoom did not materially change the scene");
   if (zoomDelta >= 8 && settleDrift > zoomDelta * 0.35) failures.push("camera moved back after wheel zoom");
-  return { zoomDelta, settleDrift, failures };
+  if (interactionBufferWidth > canvasBox.width * 1.08) failures.push(`camera interaction kept a ${interactionBufferWidth}px high-DPR buffer`);
+  if (restingBufferWidth > canvasBox.width * 1.25 && restoredBufferWidth < restingBufferWidth * 0.9) failures.push("camera interaction DPR did not recover after settling");
+  return { zoomDelta, settleDrift, restingBufferWidth, interactionBufferWidth, restoredBufferWidth, failures };
 }
 
 async function verifyControls(page) {
@@ -203,16 +291,24 @@ async function verifyControls(page) {
   await prepare(page);
   const failures = [];
   const scene = page.locator(".scene-stage");
-  const renderSurface = page.locator('[data-render-policy="adaptive-idle-30"][data-shadow-policy="state-driven"]');
-  if (await renderSurface.count() !== 1) failures.push("adaptive render and shadow budgets were not active");
+  const renderSurface = page.locator('[data-render-policy="interaction-only"][data-shadow-policy="state-driven"]');
+  if (await renderSurface.count() !== 1) failures.push("effects-off interaction-only render and shadow budgets were not active");
   const connectionCount = Number(await scene.getAttribute("data-architecture-connections"));
-  if (connectionCount !== 11) failures.push(`expected 11 architecture connections, got ${connectionCount}`);
+  const expectedConnectionCount = await page.evaluate(async () => {
+    const response = await fetch("/api/snapshot");
+    const snapshot = await response.json();
+    return Array.isArray(snapshot.connections) ? snapshot.connections.length : -1;
+  });
+  if (connectionCount !== expectedConnectionCount) failures.push(`expected ${expectedConnectionCount} architecture connections, got ${connectionCount}`);
   await clickControl(page.getByRole("button", { name: "Seed 大腦", exact: true }).first());
   await page.waitForTimeout(450);
   const flowLabels = await page.locator(".flow-label").count();
   const detailFlows = await page.locator(".flow-list button").count();
   if (flowLabels < 2) failures.push(`expected selected neural flow labels, got ${flowLabels}`);
   if (detailFlows < 2) failures.push(`expected architecture navigation rows, got ${detailFlows}`);
+
+  await clickControl(page.getByRole("button", { name: "總覽", exact: true }));
+  await page.waitForFunction(() => document.querySelector(".app-shell")?.getAttribute("data-effect-distance") === "far");
 
   await pointerClick(page, page.getByRole("button", { name: "設定" }));
   await clickControl(page.getByRole("button", { name: "EN", exact: true }));
@@ -240,8 +336,40 @@ async function verifyControls(page) {
   await clickControl(page.getByRole("button", { name: "古樹遺跡", exact: true }));
   if ((await scene.getAttribute("data-world-tree")) !== "detailed") failures.push("detailed tree contract was not applied");
   if ((await scene.getAttribute("data-ancient-ruins")) !== "visible") failures.push("ancient ruins contract was not applied");
+  await clickControl(page.getByRole("tab", { name: "特效", exact: true }));
+  const shell = page.locator(".app-shell");
+  const effectsPanel = page.getByTestId("effects-settings");
+  const effectsMaster = effectsPanel.getByRole("switch", { name: "特效總開關", exact: true });
+  if (await effectsMaster.getAttribute("aria-checked") !== "false") failures.push("effects did not default to off for development and first use");
+  await clickControl(effectsMaster);
+  if ((await shell.getAttribute("data-effects")) !== "on") failures.push("effects master did not enable the scene");
+  for (const key of ["flow", "glow", "motion"]) {
+    if ((await shell.getAttribute(`data-effect-${key}`)) !== "on") failures.push(`${key} did not restore with effects master`);
+  }
+  if ((await shell.getAttribute("data-effect-distance")) !== "far") failures.push("effects settings did not retain the far camera state");
+  if ((await shell.getAttribute("data-effect-particles")) !== "off" || (await shell.getAttribute("data-effect-clouds")) !== "on") failures.push("far view did not choose clouds over motes");
+  if ((await shell.getAttribute("data-effect-particles-preference")) !== "on" || (await shell.getAttribute("data-effect-clouds-preference")) !== "on") failures.push("adaptive distance changed saved effect preferences");
+  if (!await effectsPanel.getByText("遠景自動模式：顯示雲幕、隱藏微光。", { exact: true }).count()) failures.push("adaptive distance status was not explained in settings");
+  const flowSwitch = effectsPanel.getByRole("switch", { name: "管路流動", exact: true });
+  await clickControl(flowSwitch);
+  if ((await shell.getAttribute("data-effect-flow")) !== "off") failures.push("flow effect did not stop independently");
+  await clickControl(flowSwitch);
+  const cloudSwitch = effectsPanel.getByRole("switch", { name: "流動雲幕", exact: true });
+  await clickControl(cloudSwitch);
+  if ((await cloudLayerStyle(page)).animationName !== "none") failures.push("cloud effect did not stop independently");
+  await clickControl(cloudSwitch);
+  const detailedAtmosphereStart = await cloudLayerStyle(page);
+  await page.waitForTimeout(1600);
   const detailedAtmosphere = await cloudLayerStyle(page);
-  if (detailedAtmosphere.animationName !== "canopy-cloud-drift" || detailedAtmosphere.opacity < 0.25) failures.push("detailed drifting cloud layer was not active");
+  const detailedCloudDrift = Math.hypot(
+    detailedAtmosphere.translateX - detailedAtmosphereStart.translateX,
+    detailedAtmosphere.translateY - detailedAtmosphereStart.translateY,
+  );
+  if (detailedAtmosphere.animationName !== "canopy-cloud-drift" || detailedAtmosphere.opacity < 0.35) failures.push("detailed drifting cloud layer was not active");
+  if (!detailedAtmosphere.backgroundImage.includes("canopy-cloud-wisps.svg")) failures.push("recognizable cloud artwork was not loaded");
+  if (!detailedAtmosphere.reducedMotion && detailedCloudDrift < 9) failures.push(`detailed cloud layer moved only ${detailedCloudDrift.toFixed(1)}px in 1.6s`);
+
+  await clickControl(page.getByRole("tab", { name: "一般", exact: true }));
 
   const volume = page.getByRole("slider", { name: "背景音量" });
   await volume.fill("1");
@@ -280,10 +408,18 @@ async function verifyControls(page) {
   await bgm.waitFor({ state: "visible", timeout: 10000 });
   await page.waitForFunction(() => localStorage.getItem("canopy.bgm") === "off", null, { timeout: 10000 });
 
-  await clickControl(page.getByRole("button", { name: "進入根系記憶" }).first());
+  // Physical 3D hit targeting is covered separately below.  Here we are
+  // verifying the detail/navigation contract, so dispatch the projected
+  // label's own action without letting its moving screen-space position make
+  // this control test camera-dependent.
+  await scene.getByRole("button", { name: "Seed 記憶", exact: true }).evaluate((element) => element.click());
+  const memoryPanel = page.locator(".detail-panel");
+  await memoryPanel.getByRole("heading", { name: "Seed 記憶", exact: true }).waitFor({ timeout: 10000 });
+  if (await memoryPanel.getByRole("button", { name: "探索內部結構", exact: true }).count()) failures.push("Seed Memory still exposed Seed Core as an internal child");
+  await clickControl(memoryPanel.getByRole("button", { name: "進入根系記憶", exact: true }));
   await page.getByText("讓新工具延續既有習慣", { exact: true }).first().waitFor({ timeout: 10000 });
   await page.getByText("seed.capability.map_new_tools_to_habits", { exact: true }).first().waitFor({ timeout: 10000 });
-  return { connectionCount, flowLabels, detailFlows, musicOptionCount, audioAssetsReady, detailedAtmosphere, failures };
+  return { connectionCount, expectedConnectionCount, flowLabels, detailFlows, musicOptionCount, audioAssetsReady, detailedAtmosphere, detailedCloudDrift, failures };
 }
 
 async function verifyNarrowMusicSettings(page) {
@@ -316,7 +452,17 @@ async function verifyNarrowMusicSettings(page) {
   await resonantChimes.scrollIntoViewIfNeeded();
   await pointerClick(page, resonantChimes);
   await page.waitForFunction(() => localStorage.getItem("canopy.music") === "resonant-chimes", null, { timeout: 10000 });
-  return { panelBounds, lastTrackBounds, panelMetrics, failures };
+  await clickControl(panel.getByRole("tab", { name: "特效", exact: true }));
+  const finalEffect = panel.getByRole("switch", { name: "生命單元懸浮", exact: true });
+  await finalEffect.scrollIntoViewIfNeeded();
+  const finalEffectBounds = await finalEffect.boundingBox();
+  const effectsPanelMetrics = await panel.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  if (!finalEffectBounds || finalEffectBounds.x < 0 || finalEffectBounds.x + finalEffectBounds.width > 390) failures.push("narrow effects switches escape the settings panel");
+  if (effectsPanelMetrics.scrollWidth > effectsPanelMetrics.clientWidth + 1) failures.push("narrow effects settings scroll horizontally");
+  return { panelBounds, lastTrackBounds, panelMetrics, finalEffectBounds, effectsPanelMetrics, failures };
 }
 
 async function verifyPickingAndNavigation(page) {
@@ -388,6 +534,30 @@ async function verifyPickingAndNavigation(page) {
     failures.push("leaf navigation did not reduce to its empty state and one back action");
   }
 
+  await prepare(page, { background: "detailed" });
+  await clickOrganBody(page, "Seed 核心", 1440);
+  await page.waitForTimeout(450);
+  const corePanel = page.locator(".detail-panel");
+  const coreTitle = await corePanel.locator("h2").innerText().catch(() => "");
+  if (coreTitle !== "Seed 核心") failures.push(`Seed Core body selected ${coreTitle || "nothing"}`);
+  if (!await corePanel.getByText("核心契約", { exact: true }).count()) failures.push("Seed Core flow to Brain was not visible");
+  const coreExplore = corePanel.getByRole("button", { name: "探索內部結構", exact: true });
+  if ((await coreExplore.count()) !== 1) failures.push("Seed Core did not expose its own structure");
+  if (await coreExplore.count()) {
+    await clickControl(coreExplore);
+    await page.waitForTimeout(350);
+    const coreScope = await corePanel.getAttribute("data-navigation-scope");
+    const coreDepth = await corePanel.getAttribute("data-navigation-depth");
+    if (coreScope !== "inside" || coreDepth !== "2") failures.push(`Seed Core navigation state was ${coreScope}/${coreDepth}`);
+    const coreSystem = corePanel.locator(".structure-relations button").filter({ hasText: "Seed Core" }).first();
+    if (!await coreSystem.count()) failures.push("Seed Core structure did not contain its contract system");
+    else {
+      await clickControl(coreSystem);
+      await page.waitForTimeout(300);
+      if (!await corePanel.locator(".structure-relations button").filter({ hasText: "core" }).count()) failures.push("Seed Core contract paths were not reachable");
+    }
+  }
+
   const narrowResults = [];
   for (const background of ["detailed", "simple", "none"]) {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -409,6 +579,7 @@ async function verifyPickingAndNavigation(page) {
     rotatedDetailTitle,
     shellTitle,
     leafTitle,
+    coreTitle,
     failures,
   };
 }
@@ -434,7 +605,19 @@ async function verifyActivityAndTreatments(page) {
   const replayed = await dateLabel.innerText();
   if (replayed === previous) failures.push("activity playback did not advance the date");
 
-  const activeModule = timeline.locator(".timeline-modules button:not(:disabled)").first();
+  const activeDate = await page.evaluate(async () => {
+    const response = await fetch("/api/snapshot");
+    const snapshot = await response.json();
+    return [...(snapshot.activity?.daily ?? [])].reverse().find((day) => (
+      Object.values(day.module_counts ?? {}).some((count) => Number(count) > 0)
+    ))?.date ?? "";
+  });
+  if (activeDate) {
+    await clickControl(timeline.getByRole("listitem", { name: new RegExp(`^${activeDate},`) }));
+  }
+  const activeModule = timeline.locator('.timeline-modules button[data-module-id="seed-memory"]:not(:disabled)');
+  await activeModule.waitFor({ state: "visible", timeout: 10000 }).catch(() => undefined);
+  if (!activeDate || !await activeModule.count()) throw new Error("activity projection has no selectable living-unit evidence day");
   await clickControl(activeModule);
   await page.locator(".recent-activity").waitFor({ state: "visible", timeout: 10000 });
   await clickControl(page.getByRole("button", { name: "提出生命單元改善", exact: true }));
@@ -620,7 +803,7 @@ const browser = await chromium.launch({
   args: ["--enable-webgl", "--ignore-gpu-blocklist", "--autoplay-policy=no-user-gesture-required"],
 });
 try {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ deviceScaleFactor: 2 });
   await installWebglCounter(page);
   const runtimeErrors = [];
   page.on("pageerror", (error) => {

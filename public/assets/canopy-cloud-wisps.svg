@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 520" preserveAspectRatio="none">
+  <defs>
+    <filter id="soft-cloud" x="-15%" y="-25%" width="130%" height="160%">
+      <feGaussianBlur stdDeviation="8" />
+    </filter>
+    <linearGradient id="cloud-light" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fffdf0" stop-opacity="0.94" />
+      <stop offset="0.5" stop-color="#eefcff" stop-opacity="0.82" />
+      <stop offset="1" stop-color="#a9cbd0" stop-opacity="0.18" />
+    </linearGradient>
+    <linearGradient id="cloud-shade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a8c9cc" stop-opacity="0.08" />
+      <stop offset="0.52" stop-color="#8eb5b9" stop-opacity="0.34" />
+      <stop offset="1" stop-color="#dff5f4" stop-opacity="0.06" />
+    </linearGradient>
+  </defs>
+
+  <g filter="url(#soft-cloud)">
+    <path fill="url(#cloud-light)" d="M-95 360c52-65 122-79 181-49 35-78 133-102 193-45 67-58 171-21 177 68 67-1 113 35 126 91H-95z" />
+    <path fill="url(#cloud-shade)" d="M-90 405c123-31 247-33 363-5 94 23 175 18 271-7v73H-90z" />
+    <ellipse cx="101" cy="325" rx="107" ry="69" fill="#f8ffff" fill-opacity="0.5" />
+    <ellipse cx="287" cy="312" rx="132" ry="78" fill="#fff9e5" fill-opacity="0.44" />
+
+    <path fill="url(#cloud-light)" d="M1010 305c43-61 108-79 168-48 43-89 158-104 214-23 71-34 153 4 162 83 63 4 108 43 120 104h-664z" />
+    <path fill="url(#cloud-shade)" d="M984 395c121-36 232-28 349 4 119 32 239 29 352-9v79H984z" />
+    <ellipse cx="1208" cy="283" rx="119" ry="73" fill="#f7ffff" fill-opacity="0.5" />
+    <ellipse cx="1436" cy="286" rx="137" ry="83" fill="#fff8df" fill-opacity="0.38" />
+
+    <path fill="url(#cloud-light)" fill-opacity="0.64" d="M610 184c33-46 87-55 127-26 35-67 124-69 158-4 54-20 112 14 119 72H610z" />
+  </g>
+
+  <g fill="none" stroke="#f4ffff" stroke-linecap="round">
+    <path d="M-20 397c132-42 260-31 370 8 61 22 121 20 181-5" stroke-width="16" stroke-opacity="0.23" />
+    <path d="M1060 390c105-34 212-28 310 5 77 26 155 25 230-3" stroke-width="15" stroke-opacity="0.22" />
+    <path d="M658 213c67-24 144-23 210 2" stroke-width="10" stroke-opacity="0.2" />
+  </g>
+</svg>
