@@ -4,10 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
+from backend.app import main as backend_main
 from backend.app.canopy_adapter import CanopyAdapter, normalized_status, worst_status
 from backend.app.database import ObservatoryDatabase
 from backend.app.proposals import build_treatment_proposal
+from backend.app.topology import TopologyContractError, validate_snapshot_topology
 
 
 class StatusContractTest(unittest.TestCase):
@@ -23,6 +26,126 @@ class StatusContractTest(unittest.TestCase):
         self.assertEqual(snapshot["source_mode"], "disconnected")
         self.assertEqual(snapshot["overall"]["status"], "critical")
         self.assertEqual(snapshot["seed_memory"]["cards"], [])
+
+
+def topology_snapshot(*, extra_module: bool = False) -> dict:
+    modules = [
+        {"id": "brain", "health": {"status": "healthy"}},
+        {"id": "hooks", "health": {"status": "healthy"}},
+    ]
+    nodes = [
+        {"id": "root", "parent_id": "", "kind": "canopy", "module_id": "", "dependencies": []},
+        {"id": "module:brain", "parent_id": "root", "kind": "organ", "module_id": "brain", "dependencies": []},
+        {"id": "module:hooks", "parent_id": "root", "kind": "organ", "module_id": "hooks", "dependencies": []},
+    ]
+    edges = [
+        {"source": "root", "target": "module:brain", "relation": "contains"},
+        {"source": "root", "target": "module:hooks", "relation": "contains"},
+    ]
+    connections = [
+        {
+            "id": "brain_hooks",
+            "source": "brain",
+            "target": "hooks",
+            "phase": "preflight",
+            "signal": {"semantics": "architectural_flow_not_live_packet_trace"},
+        }
+    ]
+    if extra_module:
+        modules.append({"id": "new-capability", "health": {"status": "healthy"}})
+        nodes.append(
+            {"id": "module:new-capability", "parent_id": "root", "kind": "organ", "module_id": "new-capability", "dependencies": []}
+        )
+        edges.append({"source": "root", "target": "module:new-capability", "relation": "contains"})
+        connections.append(
+            {
+                "id": "hooks_new_capability",
+                "source": "hooks",
+                "target": "new-capability",
+                "phase": "postflight",
+                "signal": {"semantics": "architectural_flow_not_live_packet_trace"},
+            }
+        )
+    return {
+        "source_mode": "canopy_public_contract",
+        "modules": modules,
+        "topology": {
+            "schema_version": 2,
+            "contract_id": "canopy.observability_topology",
+            "signal_semantics": "architectural_flow_not_live_packet_trace",
+            "structure_contract_id": "canopy.public_structure",
+        },
+        "connections": connections,
+        "structure": {"root_id": "root", "nodes": nodes, "edges": edges},
+    }
+
+
+class TopologyProjectionContractTest(unittest.TestCase):
+    def test_new_module_and_connection_are_accepted_without_a_ui_catalog(self) -> None:
+        report = validate_snapshot_topology(topology_snapshot(extra_module=True))
+
+        self.assertEqual(report["status"], "valid")
+        self.assertEqual(report["module_count"], 3)
+        self.assertEqual(report["connection_count"], 2)
+        self.assertEqual(len(report["fingerprint"]), 64)
+
+    def test_unknown_connection_endpoint_is_rejected_before_projection(self) -> None:
+        snapshot = topology_snapshot()
+        snapshot["connections"][0]["target"] = "missing-module"
+
+        with self.assertRaisesRegex(TopologyContractError, "unknown module"):
+            validate_snapshot_topology(snapshot)
+
+    def test_isolated_new_module_is_rejected_until_connections_are_declared(self) -> None:
+        snapshot = topology_snapshot(extra_module=True)
+        snapshot["connections"].pop()
+
+        with self.assertRaisesRegex(TopologyContractError, "without a connection"):
+            validate_snapshot_topology(snapshot)
+
+    def test_structure_must_reach_the_declared_root(self) -> None:
+        snapshot = topology_snapshot()
+        snapshot["structure"]["nodes"][1]["parent_id"] = "module:hooks"
+
+        with self.assertRaisesRegex(TopologyContractError, "parent does not match"):
+            validate_snapshot_topology(snapshot)
+
+    def test_legacy_compatibility_snapshot_is_explicitly_unavailable(self) -> None:
+        report = validate_snapshot_topology({"modules": [{"id": "brain"}]})
+
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["fingerprint"], "")
+
+
+class TopologySyncRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_topology_never_reaches_snapshot_storage(self) -> None:
+        invalid = topology_snapshot()
+        invalid["connections"][0]["target"] = "missing-module"
+
+        with (
+            patch.object(backend_main.adapter, "collect", return_value=invalid),
+            patch.object(backend_main.database, "latest_snapshot") as latest,
+            patch.object(backend_main.database, "save_snapshot") as save,
+        ):
+            with self.assertRaisesRegex(TopologyContractError, "unknown module"):
+                await backend_main.sync_snapshot()
+
+        latest.assert_not_called()
+        save.assert_not_called()
+
+    async def test_unavailable_topology_keeps_the_last_verified_projection(self) -> None:
+        verified = topology_snapshot()
+        unavailable = {"source_mode": "compatibility_adapter", "modules": verified["modules"]}
+
+        with (
+            patch.object(backend_main.adapter, "collect", return_value=unavailable),
+            patch.object(backend_main.database, "latest_snapshot", return_value=verified),
+            patch.object(backend_main.database, "save_snapshot") as save,
+        ):
+            with self.assertRaisesRegex(TopologyContractError, "retained the last verified"):
+                await backend_main.sync_snapshot()
+
+        save.assert_not_called()
 
 
 class ProposalBoundaryTest(unittest.TestCase):

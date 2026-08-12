@@ -312,6 +312,52 @@ def doctor(canopy_root: Path) -> int:
     return 1 if any(status == "FAIL" for status, _, _ in checks) else 0
 
 
+def sync_projection(canopy_root: Path) -> dict[str, object]:
+    runtime = running_runtime()
+    if runtime:
+        port = int(runtime["port"])
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/sync",
+            data=b"",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"living system sync rejected: {detail}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("living system sync returned an invalid response")
+        return payload
+
+    if not venv_python().is_file():
+        raise RuntimeError("Living System is not installed; run ./observatory start first")
+    script = (
+        "import asyncio, json\n"
+        "from backend.app.main import initialize_runtime, snapshot_sync_state, sync_snapshot\n"
+        "initialize_runtime()\n"
+        "snapshot = asyncio.run(sync_snapshot())\n"
+        "print(json.dumps({'snapshot': {'generated_at': snapshot.get('generated_at', '')}, "
+        "'sync': snapshot_sync_state}, ensure_ascii=False))\n"
+    )
+    env = {
+        **os.environ,
+        "CANOPY_ROOT": str(canopy_root),
+        "CANOPY_OBSERVATORY_DATA_DIR": str(DATA_DIR),
+    }
+    result = run([str(venv_python()), "-c", script], timeout=240, env=env)
+    require_success(result, "living system sync")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"living system sync returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("living system sync returned an invalid response")
+    return payload
+
+
 def update(canopy_root: Path) -> None:
     stop()
     if (ROOT / ".git").is_dir():
@@ -342,6 +388,9 @@ def parse_args() -> argparse.Namespace:
     start_parser.add_argument("--canopy-root", default="")
     start_parser.add_argument("--port", type=int, default=8765)
     start_parser.add_argument("--no-open", action="store_true")
+    sync_parser = subparsers.add_parser("sync")
+    sync_parser.add_argument("--canopy-root", default="")
+    sync_parser.add_argument("--json", action="store_true")
     subparsers.add_parser("stop")
     subparsers.add_parser("uninstall")
     subparsers.add_parser("build")
@@ -362,6 +411,17 @@ def main() -> int:
             print(start(canopy_root, preferred_port=args.port, open_browser=not args.no_open))
         elif args.command == "stop":
             print("Canopy Living System stopped" if stop() else "Canopy Living System is not running")
+        elif args.command == "sync":
+            payload = sync_projection(canopy_root)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                topology = (payload.get("sync") or {}).get("topology", {})
+                print(
+                    "Canopy Living System synchronized: "
+                    f"{topology.get('module_count', 0)} living units, "
+                    f"{topology.get('connection_count', 0)} connections verified"
+                )
         elif args.command == "update":
             update(canopy_root)
             print("Canopy Living System updated")

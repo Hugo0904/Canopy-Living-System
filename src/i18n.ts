@@ -23,7 +23,9 @@ const ZH_TW: Messages = {
   "nav.roots": "根系",
   "nav.structure": "內部",
   "nav.timeline": "歷程",
-  "nav.refresh": "更新",
+  "nav.refresh": "同步",
+  "nav.sync_detail": "重新同步生命體並確認所有連接",
+  "sync.completed": "已重新同步：{modules} 個生命單元、{connections} 條連接已確認",
   "nav.settings": "設定",
   "nav.bgm_on": "關閉背景音樂",
   "nav.bgm_off": "播放背景音樂",
@@ -258,6 +260,27 @@ const ZH_TW: Messages = {
   "life.no_events": "生命歷程正在自動同步。",
   "life.no_filtered_events": "目前沒有這一類事件。",
   "life.learned": "這次我學到",
+  "life.learning_status": "本回合學習判定",
+  "life.learning.applied": "運用了既有理解",
+  "life.learning.applied_detail": "Canopy 把已確認的理解交給 AI 使用；這不代表又新增一份長期記憶。",
+  "life.learning.applied_next": "相似需求可少一次重複說明。",
+  "life.learning.reviewed": "檢查後沒有硬套記憶",
+  "life.learning.reviewed_detail": "Canopy 判斷既有理解不適合本次情境，因此沒有套用，也沒有新增記憶。",
+  "life.learning.reviewed_next": "不相關的舊理解不會干擾這次需求。",
+  "life.learning.reviewing": "正在判斷既有理解是否適用",
+  "life.learning.reviewing_detail": "Canopy 已找到可能相關的理解；是否真的採用，要以同回合的 Seed 行動與收尾回條為準。",
+  "life.learning.pending": "回合仍在進行",
+  "life.learning.pending_detail": "完成後才會依可查回條判斷是否形成新學習；進行中不先宣稱學會。",
+  "life.learning.incomplete": "這次沒有形成完成的學習",
+  "life.learning.incomplete_detail": "回合被保護、中止或尚有缺漏，因此 Canopy 不把未完成結果當成已學會。",
+  "life.learning.matched": "已找到相關的既有理解",
+  "life.learning.matched_detail": "這筆回合證據顯示記憶曾被找到；是否實際採用，請看同回合的 Seed 行動。",
+  "life.learning.none": "沒有形成新的長期記憶",
+  "life.learning.none_detail": "完成工作不等於學習；這次沒有可驗證的 Seed 吸收或理解偏差修正紀錄。",
+  "life.learning.miss_review": "正在復盤理解偏差",
+  "life.learning.miss_review_detail": "Canopy 已察覺理解或路由可能有偏差；修正完成前不把它當成穩定學習。",
+  "life.learning.evidence_unavailable": "已有吸收事件，但缺少可顯示內容",
+  "life.learning.evidence_unavailable_detail": "Canopy 保留事件狀態，但不從其他摘要猜測學到什麼。",
   "life.next_time": "下次會更懂你：",
   "life.details": "這回合實際做了什麼",
   "life.focus_note": "同時聚焦對應生命部位",
@@ -292,6 +315,10 @@ const ZH_TW: Messages = {
   "life.stage.applied": "已運用",
   "life.stage.resolved": "已修正",
   "life.stage.observed": "新觀察",
+  "life.stage.reviewed": "未硬套",
+  "life.stage.pending": "待完成",
+  "life.stage.none": "無新增",
+  "life.stage.incomplete": "未形成",
   "aria.life_stream": "AI 助理生命歷程",
   "timeline.eyebrow": "成長回放",
   "timeline.title": "30 天演化歷程",
@@ -379,7 +406,9 @@ const EN: Messages = {
   "nav.roots": "Roots",
   "nav.structure": "Inside",
   "nav.timeline": "History",
-  "nav.refresh": "Refresh",
+  "nav.refresh": "Sync",
+  "nav.sync_detail": "Re-sync the living system and verify every connection",
+  "sync.completed": "Synced: {modules} living units and {connections} connections verified",
   "nav.settings": "Settings",
   "nav.bgm_on": "Mute background music",
   "nav.bgm_off": "Play background music",
@@ -614,6 +643,27 @@ const EN: Messages = {
   "life.no_events": "Life history is syncing automatically.",
   "life.no_filtered_events": "No events of this kind yet.",
   "life.learned": "What I learned",
+  "life.learning_status": "Learning decision for this turn",
+  "life.learning.applied": "Used an existing understanding",
+  "life.learning.applied_detail": "Canopy gave the AI an already confirmed understanding. This does not create another long-term memory.",
+  "life.learning.applied_next": "A similar request may need less repeated explanation.",
+  "life.learning.reviewed": "Reviewed memory without forcing it",
+  "life.learning.reviewed_detail": "Canopy determined that the existing understanding did not fit this situation, so it was neither applied nor saved again.",
+  "life.learning.reviewed_next": "Unrelated prior understanding will not distort this request.",
+  "life.learning.reviewing": "Checking whether an existing understanding applies",
+  "life.learning.reviewing_detail": "Canopy found a potentially relevant understanding. The correlated Seed action and closure receipt determine whether it was actually used.",
+  "life.learning.pending": "The turn is still in progress",
+  "life.learning.pending_detail": "Canopy waits for auditable closure evidence before deciding whether learning occurred; it does not claim learning early.",
+  "life.learning.incomplete": "No completed learning was formed",
+  "life.learning.incomplete_detail": "The turn was protected, interrupted, or incomplete, so Canopy does not present the unfinished outcome as learned.",
+  "life.learning.matched": "Found a relevant existing understanding",
+  "life.learning.matched_detail": "This turn shows that memory was found. Check the correlated Seed action to see whether it was actually applied.",
+  "life.learning.none": "No new long-term memory was formed",
+  "life.learning.none_detail": "Completing work is not the same as learning. This turn has no verified Seed intake or corrected-understanding evidence.",
+  "life.learning.miss_review": "Reviewing an understanding mismatch",
+  "life.learning.miss_review_detail": "Canopy detected a possible understanding or routing mismatch. It is not presented as stable learning until the correction is complete.",
+  "life.learning.evidence_unavailable": "An intake event exists without displayable content",
+  "life.learning.evidence_unavailable_detail": "Canopy preserves the event state without guessing what was learned from another summary.",
   "life.next_time": "How this helps next time: ",
   "life.details": "What this turn actually did",
   "life.focus_note": "Also focuses the related living unit",
@@ -648,6 +698,10 @@ const EN: Messages = {
   "life.stage.applied": "Applied",
   "life.stage.resolved": "Corrected",
   "life.stage.observed": "New observation",
+  "life.stage.reviewed": "Not forced",
+  "life.stage.pending": "Pending closure",
+  "life.stage.none": "No addition",
+  "life.stage.incomplete": "Not formed",
   "aria.life_stream": "AI assistant life history",
   "timeline.eyebrow": "GROWTH REPLAY",
   "timeline.title": "30-day evolution history",
@@ -673,12 +727,16 @@ export function t(locale: Locale, key: string, params: Record<string, string | n
   );
 }
 
-export function moduleName(locale: Locale, moduleId: string): string {
-  return t(locale, `module.${moduleId}.name`);
+export function moduleName(locale: Locale, moduleId: string, fallback = moduleId): string {
+  const key = `module.${moduleId}.name`;
+  const translated = t(locale, key);
+  return translated === key ? fallback : translated;
 }
 
-export function moduleZone(locale: Locale, moduleId: string): string {
-  return t(locale, `module.${moduleId}.zone`);
+export function moduleZone(locale: Locale, moduleId: string, fallback = moduleId): string {
+  const key = `module.${moduleId}.zone`;
+  const translated = t(locale, key);
+  return translated === key ? fallback : translated;
 }
 
 export function moduleSummary(locale: Locale, module: ModuleHealth): string {
@@ -695,7 +753,7 @@ const STRUCTURE_NAME_KEYS: Record<string, string> = {
 export function structureDisplayName(locale: Locale, node: StructureNode): string {
   const key = STRUCTURE_NAME_KEYS[node.id];
   if (key) return t(locale, key);
-  if (node.id.startsWith("module:")) return moduleName(locale, node.module_id);
+  if (node.id.startsWith("module:")) return moduleName(locale, node.module_id, node.name);
   return node.name;
 }
 

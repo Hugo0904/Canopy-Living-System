@@ -15,6 +15,7 @@ from .canopy_adapter import CanopyAdapter
 from .database import ObservatoryDatabase
 from .proposals import build_treatment_proposal
 from .settings import Settings
+from .topology import TopologyContractError, validate_snapshot_topology
 
 
 settings = Settings.from_env()
@@ -39,6 +40,16 @@ snapshot_sync_state: dict[str, Any] = {
     "status": "starting",
     "last_synced_at": "",
     "last_error": "",
+    "changed": False,
+    "topology": {
+        "status": "unavailable",
+        "fingerprint": "",
+        "contract_id": "",
+        "schema_version": 0,
+        "module_count": 0,
+        "connection_count": 0,
+        "structure_node_count": 0,
+    },
 }
 
 
@@ -101,12 +112,22 @@ async def life_event_sync_loop() -> None:
 async def sync_snapshot() -> dict[str, Any]:
     try:
         snapshot = await asyncio.to_thread(adapter.collect, refresh=True)
-        await asyncio.to_thread(database.save_snapshot, snapshot)
+        topology = validate_snapshot_topology(snapshot)
+        latest = await asyncio.to_thread(database.latest_snapshot)
+        if topology["status"] == "unavailable" and latest is not None:
+            latest_topology = validate_snapshot_topology(latest)
+            if latest_topology["status"] == "valid":
+                raise TopologyContractError(
+                    "Canopy public topology is temporarily unavailable; retained the last verified projection"
+                )
+        changed = await asyncio.to_thread(database.save_snapshot, snapshot)
         snapshot_sync_state.update(
             {
                 "status": "live",
                 "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "last_error": "",
+                "changed": changed,
+                "topology": topology,
             }
         )
         return snapshot
@@ -194,7 +215,20 @@ async def api_snapshot(refresh: bool = Query(default=False)) -> dict[str, Any]:
         persisted = await asyncio.to_thread(database.latest_snapshot)
         if persisted is not None:
             return persisted
-    return await sync_snapshot()
+    try:
+        return await sync_snapshot()
+    except TopologyContractError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/sync")
+async def api_sync() -> dict[str, Any]:
+    """Rebuild the local projection through the same path as automatic sync."""
+    try:
+        snapshot = await sync_snapshot()
+    except TopologyContractError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"snapshot": snapshot, "sync": dict(snapshot_sync_state)}
 
 
 @app.get("/api/cards")

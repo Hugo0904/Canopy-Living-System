@@ -67,6 +67,116 @@ function visibleSummary(value: string | undefined, locale: Locale): string {
     : summary;
 }
 
+interface LearningDisposition {
+  mode: "applied" | "reviewed" | "reviewing" | "pending" | "none" | "incomplete";
+  title: string;
+  detail: string;
+  nextBenefit: string;
+  stage: string;
+}
+
+function learningDisposition(event: ActivityEvent, locale: Locale): LearningDisposition | undefined {
+  // A concrete learning is rendered from Core evidence below. Never replace it
+  // with a UI inference or reuse an assistant summary as if it were memory.
+  if (String(event.learning ?? "").trim()) return undefined;
+
+  const resolverStatus = String(event.facts?.resolver_status ?? "");
+  const matchedCards = Number(event.facts?.matched_cards ?? 0) || 0;
+  const matchedExistingMemory = matchedCards > 0 || [
+    "specific_card_matched",
+    "semantic_review_required",
+  ].includes(resolverStatus);
+
+  if (event.kind === "seed_action") {
+    if (event.status === "applied") {
+      return {
+        mode: "applied",
+        title: t(locale, "life.learning.applied"),
+        detail: t(locale, "life.learning.applied_detail"),
+        nextBenefit: event.next_benefit || t(locale, "life.learning.applied_next"),
+        stage: "applied",
+      };
+    }
+    return {
+      mode: "reviewed",
+      title: t(locale, "life.learning.reviewed"),
+      detail: t(locale, "life.learning.reviewed_detail"),
+      nextBenefit: t(locale, "life.learning.reviewed_next"),
+      stage: "reviewed",
+    };
+  }
+
+  if (event.growth_stage === "applied") {
+    return {
+      mode: "applied",
+      title: t(locale, "life.learning.applied"),
+      detail: t(locale, "life.learning.applied_detail"),
+      nextBenefit: event.next_benefit || t(locale, "life.learning.applied_next"),
+      stage: "applied",
+    };
+  }
+
+  if (event.kind === "miss_analysis") {
+    return {
+      mode: "reviewing",
+      title: t(locale, "life.learning.miss_review"),
+      detail: t(locale, "life.learning.miss_review_detail"),
+      nextBenefit: "",
+      stage: "observed",
+    };
+  }
+
+  if (event.kind === "seed_intake") {
+    return {
+      mode: "reviewing",
+      title: t(locale, "life.learning.evidence_unavailable"),
+      detail: t(locale, "life.learning.evidence_unavailable_detail"),
+      nextBenefit: "",
+      stage: event.growth_stage || "observed",
+    };
+  }
+
+  if (event.kind !== "turn") return undefined;
+
+  if (event.status === "in_progress") {
+    return {
+      mode: matchedExistingMemory ? "reviewing" : "pending",
+      title: t(locale, matchedExistingMemory ? "life.learning.reviewing" : "life.learning.pending"),
+      detail: t(locale, matchedExistingMemory ? "life.learning.reviewing_detail" : "life.learning.pending_detail"),
+      nextBenefit: "",
+      stage: "pending",
+    };
+  }
+
+  if (event.phase === "protection" || ["blocked", "interrupted", "attention", "failed"].includes(event.status)) {
+    return {
+      mode: "incomplete",
+      title: t(locale, "life.learning.incomplete"),
+      detail: t(locale, "life.learning.incomplete_detail"),
+      nextBenefit: "",
+      stage: "incomplete",
+    };
+  }
+
+  if (matchedExistingMemory) {
+    return {
+      mode: "reviewing",
+      title: t(locale, "life.learning.matched"),
+      detail: t(locale, "life.learning.matched_detail"),
+      nextBenefit: "",
+      stage: "observed",
+    };
+  }
+
+  return {
+    mode: "none",
+    title: t(locale, "life.learning.none"),
+    detail: t(locale, "life.learning.none_detail"),
+    nextBenefit: "",
+    stage: "none",
+  };
+}
+
 export function LifeStreamPanel({
   events,
   sync,
@@ -149,8 +259,9 @@ export function LifeStreamPanel({
             .filter(([, value]) => value && value !== "unreported" && value !== "0" && value !== "false");
           const summary = visibleSummary(event.summary, locale);
           const assistance = visibleSummary(event.assistance, locale);
+          const learningState = learningDisposition(event, locale);
           return (
-          <article key={event.id} className="life-event" data-phase={event.phase} data-status={event.status} data-expanded={expanded ? "true" : "false"}>
+          <article key={event.id} className="life-event" data-kind={event.kind} data-phase={event.phase} data-status={event.status} data-expanded={expanded ? "true" : "false"}>
             <button className="life-event-main" onClick={() => selectEvent(event)} aria-expanded={expanded}>
               <span className="life-event-icon">{phaseIcon(event)}</span>
               <span className="life-event-copy">
@@ -166,6 +277,15 @@ export function LifeStreamPanel({
                 {assistance && <div><span>{t(locale, "life.helped")}</span><p>{assistance}</p></div>}
                 {event.request_effect && <div><span>{t(locale, "life.request_effect")}</span><p>{event.request_effect}</p></div>}
                 {event.verification && <div><span>{t(locale, "life.verified")}</span><p>{event.verification}</p></div>}
+                {learningState && (
+                  <div className="life-learning-status" data-mode={learningState.mode}>
+                    <span><Sparkles size={12} />{t(locale, "life.learning_status")}</span>
+                    <strong>{learningState.title}</strong>
+                    <p>{learningState.detail}</p>
+                    {learningState.nextBenefit && <small><strong>{t(locale, "life.next_time")}</strong>{learningState.nextBenefit}</small>}
+                    <em>{t(locale, `life.stage.${learningState.stage}`)}</em>
+                  </div>
+                )}
                 {facts.length > 0 && <dl>{facts.map(([key, value]) => <div key={key}><dt>{t(locale, `life.fact.${key}`)}</dt><dd>{value}</dd></div>)}</dl>}
                 {relatedEvents.length > 0 && (
                   <div className="life-turn-steps">

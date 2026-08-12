@@ -29,7 +29,7 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { fetchLifeEvents, fetchSnapshot } from "./api";
+import { fetchLifeEvents, fetchSnapshot, syncSnapshot } from "./api";
 import { AmbientBgm, ambientTrackInfo, playUiClick, type AmbientTrackId } from "./audio/ambientBgm";
 import { CanopyScene } from "./components/CanopyScene";
 import { ActivityTimeline } from "./components/ActivityTimeline";
@@ -323,7 +323,7 @@ function DetailPanel({
       <div className="detail-heading">
         <div className="module-title">
           <Icon size={20} />
-          <div><span className="eyebrow">{moduleZone(locale, module.id)}</span><h2>{moduleName(locale, module.id)}</h2></div>
+          <div><span className="eyebrow">{moduleZone(locale, module.id, module.zone)}</span><h2>{moduleName(locale, module.id, module.name)}</h2></div>
         </div>
         <div className="detail-actions"><StatusPill status={module.health.status} locale={locale} /><button className="icon-button" onClick={onClose} aria-label={t(locale, "common.close")}><X size={16} /></button></div>
       </div>
@@ -568,6 +568,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [syncNotice, setSyncNotice] = useState("");
   const [view, setView] = useState<ObservatoryView>("overview");
   const [selectedModuleId, setSelectedModuleId] = useState("");
   const [selectedCardId, setSelectedCardId] = useState("");
@@ -606,6 +607,12 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem("canopy.life-stream", lifeStreamOpen ? "open" : "closed");
   }, [lifeStreamOpen]);
+
+  useEffect(() => {
+    if (!syncNotice) return;
+    const timer = window.setTimeout(() => setSyncNotice(""), 4800);
+    return () => window.clearTimeout(timer);
+  }, [syncNotice]);
 
   useEffect(() => {
     if (detailOpen && lifeStreamOpen) setLifeStreamOpen(false);
@@ -718,14 +725,6 @@ export default function App() {
       const next = await fetchSnapshot(refresh);
       setSnapshot(next);
       setLifeEvents((current) => current.length ? current : next.activity?.events ?? []);
-      const latestActivityDate = next.activity?.daily[next.activity.daily.length - 1]?.date ?? "";
-      setSelectedActivityDate((current) => next.activity?.daily.some((day) => day.date === current) ? current : latestActivityDate);
-      if (selectedModuleId && !next.modules.some((module) => module.id === selectedModuleId)) {
-        setSelectedModuleId(next.modules[0]?.id ?? "");
-      }
-      if (next.structure && !next.structure.nodes.some((node) => node.id === selectedStructureId)) {
-        setSelectedStructureId(next.structure.root_id);
-      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "fatal.title"));
     } finally {
@@ -735,6 +734,57 @@ export default function App() {
   }
 
   useEffect(() => { void load(); }, []);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    const latestActivityDate = snapshot.activity?.daily[snapshot.activity.daily.length - 1]?.date ?? "";
+    setSelectedActivityDate((current) => snapshot.activity?.daily.some((day) => day.date === current) ? current : latestActivityDate);
+    setSelectedModuleId((current) => current && !snapshot.modules.some((module) => module.id === current)
+      ? snapshot.modules[0]?.id ?? ""
+      : current);
+    setSelectedStructureId((current) => snapshot.structure && !snapshot.structure.nodes.some((node) => node.id === current)
+      ? snapshot.structure.root_id
+      : current);
+  }, [snapshot]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const readPersistedProjection = async () => {
+      if (document.hidden) return;
+      try {
+        const next = await fetchSnapshot(false);
+        if (cancelled) return;
+        setSnapshot((current) => current?.generated_at === next.generated_at ? current : next);
+      } catch {
+        // The visible last-known-good projection remains usable while the
+        // backend retries. Manual sync surfaces a concrete error when needed.
+      }
+    };
+    const timer = window.setInterval(() => { void readPersistedProjection(); }, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  async function synchronizeLivingSystem() {
+    setRefreshing(true);
+    setError("");
+    setSyncNotice("");
+    try {
+      const result = await syncSnapshot();
+      setSnapshot(result.snapshot);
+      setLifeEvents((current) => current.length ? current : result.snapshot.activity?.events ?? []);
+      setSyncNotice(t(locale, "sync.completed", {
+        modules: result.sync.topology.module_count,
+        connections: result.sync.topology.connection_count,
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t(locale, "fatal.title"));
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   useEffect(() => {
     if (!activityPlaying || !snapshot?.activity?.daily.length) return;
@@ -842,7 +892,7 @@ export default function App() {
 
   function proposeModuleChange(module: ModuleHealth) {
     setTreatment({
-      target: { type: "module", id: module.id, title: moduleName(locale, module.id), summary: moduleSummary(locale, module) },
+      target: { type: "module", id: module.id, title: moduleName(locale, module.id, module.name), summary: moduleSummary(locale, module) },
       intents: ["diagnose", "update"],
       initialIntent: "diagnose",
     });
@@ -939,7 +989,7 @@ export default function App() {
         <button aria-label={t(locale, "card.enter_roots")} title={t(locale, "nav.roots")} className={view === "seed" ? "is-active" : ""} onClick={enterSeed}><Sprout size={19} /><span>{t(locale, "nav.roots")}</span><em className="dock-count">{snapshot.seed_memory.active_count}</em></button>
         <button aria-label={t(locale, "structure.enter")} title={t(locale, "structure.enter")} className={view === "structure" ? "is-active" : ""} onClick={() => enterStructure(snapshot.structure?.root_id ?? "canopy-shell")}><FolderTree size={19} /><span>{t(locale, "nav.structure")}</span></button>
         <button aria-label={t(locale, "nav.timeline")} title={t(locale, "nav.timeline")} className={view === "timeline" ? "is-active" : ""} onClick={() => { setView("timeline"); setSelectedCardId(""); setDetailOpen(false); setActivityPlaying(false); }}><CalendarDays size={19} /><span>{t(locale, "nav.timeline")}</span></button>
-        <button aria-label={t(locale, "nav.refresh")} title={t(locale, "nav.refresh")} onClick={() => void load(true)} disabled={refreshing}><RefreshCw size={19} className={refreshing ? "spin" : ""} /><span>{t(locale, "nav.refresh")}</span></button>
+        <button aria-label={t(locale, "nav.sync_detail")} title={t(locale, "nav.sync_detail")} onClick={() => void synchronizeLivingSystem()} disabled={refreshing}><RefreshCw size={19} className={refreshing ? "spin" : ""} /><span>{t(locale, "nav.refresh")}</span></button>
         <button aria-label={t(locale, bgmEnabled ? "nav.bgm_on" : "nav.bgm_off")} title={t(locale, bgmEnabled ? "nav.bgm_on" : "nav.bgm_off")} aria-pressed={bgmEnabled} className={bgmEnabled ? "is-active" : ""} data-playing={bgmActive ? "true" : "false"} onClick={() => void toggleBgm()}>{bgmEnabled ? <Volume2 size={19} /> : <VolumeX size={19} />}<span>BGM</span></button>
         <button aria-label={t(locale, "nav.settings")} title={t(locale, "nav.settings")} aria-pressed={settingsOpen} className={settingsOpen ? "is-active" : ""} onClick={() => { setSettingsOpen((value) => !value); setDetailOpen(false); }}><Settings2 size={19} /><span>{t(locale, "nav.settings")}</span></button>
       </nav>
@@ -1036,6 +1086,7 @@ export default function App() {
         {(["healthy", "attention", "critical", "unknown"] as HealthStatus[]).map((status) => <span key={status}><i data-status={status} />{t(locale, `status.${status}`)}</span>)}
       </div>
 
+      {syncNotice && <div className="toast-sync" role="status">{syncNotice}</div>}
       {(error || audioError) && <div className="toast-error">{audioError || error}</div>}
       {treatment && <TreatmentComposer target={treatment.target} intents={treatment.intents} initialIntent={treatment.initialIntent} locale={locale} onClose={() => setTreatment(null)} />}
       <span className="sr-only" data-testid="architecture-count">{connections.length}</span>

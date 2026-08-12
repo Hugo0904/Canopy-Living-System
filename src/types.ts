@@ -220,6 +220,29 @@ export interface CanopySnapshot {
   };
 }
 
+export interface TopologySyncReport {
+  status: "valid" | "unavailable" | string;
+  fingerprint: string;
+  contract_id: string;
+  schema_version: number;
+  module_count: number;
+  connection_count: number;
+  structure_node_count: number;
+}
+
+export interface SnapshotSyncState {
+  status: "starting" | "live" | "degraded" | string;
+  last_synced_at: string;
+  last_error: string;
+  changed: boolean;
+  topology: TopologySyncReport;
+}
+
+export interface SyncSnapshotResponse {
+  snapshot: CanopySnapshot;
+  sync: SnapshotSyncState;
+}
+
 export interface TreatmentRequest {
   id: string;
   request_type: string;

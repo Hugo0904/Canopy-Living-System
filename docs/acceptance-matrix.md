@@ -13,6 +13,7 @@ exist. Later requests extend this list instead of replacing earlier items.
 | B03 | Runtime data is local and excluded from Git. | Implemented | `.gitignore`, `.data/`, SQLite settings |
 | B04 | Operator card changes go through an AI-reviewed proposal, never direct JSONL mutation. | Implemented | `TreatmentComposer.tsx`, `backend/app/proposals.py` |
 | B05 | Developers may request Canopy subsystem improvements through the owning workflow. | Implemented | Module detail UI creates owner-routed treatment requests with a bounded manual Codex handoff. |
+| B06 | Topology synchronization remains optional, bounded, and fail-open for Canopy Core. | Implemented | Background sync and the UI/CLI recovery action all use the Living System-owned SQLite projection; Core lifecycle fail-open tests pass. |
 
 ## Visual Experience
 
@@ -29,10 +30,11 @@ exist. Later requests extend this list instead of replacing earlier items.
 | V09 | Detail panels close during scene movement and reopen on selection. | Implemented | Scene interaction callback |
 | V10 | Top, left, and bottom HUDs start expanded and can collapse to useful compact summaries. | Implemented | `compactHud` and compact CSS states |
 | V11 | Canopy shell and growth tree are clickable architecture objects. | Implemented | DOM and browser navigation select `canopy-shell` and `growth-tree` from the 3D scene. |
-| V12 | Structure is richer than seven living units and uses actual Canopy files. | Implemented | Canopy public hierarchy exposes 171 bounded nodes and real relative paths; UI drills through them. |
+| V12 | Structure is richer than seven living units and uses actual Canopy files. | Implemented | Current Canopy public hierarchy exposes 174 bounded nodes and real relative paths; UI drills through them. |
 | V13 | Simple mode has a clearly visible cute low-complexity tree and simplified adventure-map nodes. | Implemented | Dedicated faceted tree, six roots, three branches, and simple living-unit platforms; desktop/mobile screenshots verified. |
 | V14 | Detailed mode has a distinct adventure-and-ancient-ruins world: layered tree, roots, hollow, moss, stone ring, ruins, runes, vines, lights, and spatial depth. | Implemented | Smooth layered canopy, curved branches, roots, hollow, moss, runes, lanterns, ruins, and rune platforms verified in the detailed screenshot. |
 | V15 | No-background mode removes the environmental tree and ruins while retaining simple living units and architecture signals. | Implemented | Desktop no-background screenshot and canvas pixel check passed. |
+| V16 | A new public module ID renders without a frontend catalog entry. | Implemented | `topologyLayout.ts` provides deterministic collision-avoiding placement; `GenericOrganGlyph` and source-name fallbacks avoid center overlap, receipt-shaped mislabeling, and translation-key text. |
 
 ## Audio
 
@@ -54,6 +56,7 @@ exist. Later requests extend this list instead of replacing earlier items.
 | N04 | A 30-day timeline can replay prompts, card changes, schedules, distillation, compression, and cleanup. | Implemented | Replay derives safe task summaries, execution outcomes, Seed actions/intake, and miss analysis from existing evidence; raw prompts are intentionally excluded. |
 | N05 | Timeline storage has explicit retention, cleanup, privacy, and growth bounds. | Implemented | Canopy derives at most 160 events without new storage; the Living System prunes snapshots after 30 days/500 rows and treatments after 90 days/200 rows. |
 | N06 | Historic growth can be viewed as meaningful milestones rather than raw event volume. | Implemented | Daily activity, at most 12 deduplicated milestones, active-unit highlighting, and tree growth replay are visible in the timeline. |
+| N07 | “重新同步生命體” revalidates all modules, connections, and structure before rebuilding the local view. | Implemented | `backend/app/topology.py`, `POST /api/sync`, the single UI sync action, `./observatory sync`, last-known-good rejection behavior, and 18 backend contract tests. |
 
 ## Treatment And Integration
 

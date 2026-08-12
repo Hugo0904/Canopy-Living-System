@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { cardDisplayName, moduleName, structureDisplayName, t, type Locale } from "../i18n";
+import { buildZonePositions, stableIdHash, type ZonePosition, type ZonePositionMap } from "../topologyLayout";
 import type { CanopyConnection, CanopyStructure, HealthStatus, ModuleHealth, SeedCard, StructureNode } from "../types";
 
 const STATUS_COLORS: Record<HealthStatus, string> = {
@@ -43,19 +44,6 @@ function selectFromPointer(event: ThreeEvent<MouseEvent>, onSelect: () => void) 
   if (event.delta <= MAX_CLICK_TRAVEL_PX) onSelect();
 }
 
-// Positions follow the public Canopy topology: inputs on the left, the unified
-// Hook at the execution center, evidence and evolution on the right, and shared
-// resource accounting below the complete loop.
-const ZONE_POSITIONS: Record<string, [number, number, number]> = {
-  "seed-memory": [-5.4, 0.2, 2.8],
-  brain: [-1.8, 0.75, 5.15],
-  roles: [-5.25, 0.2, -2.85],
-  hooks: [1.35, 0.25, 3.0],
-  receipts: [5.35, 0.25, 0],
-  evolution: [4.75, 0.35, -3.25],
-  resources: [0, 0.1, -5.3],
-};
-
 interface SceneProps {
   modules: ModuleHealth[];
   connections: CanopyConnection[];
@@ -88,13 +76,69 @@ function useReducedMotion(): boolean {
   return reduced;
 }
 
+const IDLE_FRAME_INTERVAL_MS = 1000 / 30;
+
+function SceneRenderBudget({ shadowRevision }: { shadowRevision: string }) {
+  const gl = useThree((state) => state.gl);
+  const invalidate = useThree((state) => state.invalidate);
+
+  useEffect(() => {
+    let animationFrame = 0;
+    let lastIdleFrame = 0;
+    const requestIdleFrame = (timestamp: number) => {
+      if (!document.hidden && timestamp - lastIdleFrame >= IDLE_FRAME_INTERVAL_MS - 1) {
+        lastIdleFrame = timestamp;
+        invalidate();
+      }
+      animationFrame = window.requestAnimationFrame(requestIdleFrame);
+    };
+    const resume = () => {
+      if (!document.hidden) {
+        lastIdleFrame = 0;
+        invalidate();
+      }
+    };
+    animationFrame = window.requestAnimationFrame(requestIdleFrame);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      document.removeEventListener("visibilitychange", resume);
+    };
+  }, [invalidate]);
+
+  useEffect(() => {
+    const previousAutoUpdate = gl.shadowMap.autoUpdate;
+    gl.shadowMap.autoUpdate = false;
+    gl.shadowMap.needsUpdate = true;
+    invalidate();
+    return () => {
+      gl.shadowMap.autoUpdate = previousAutoUpdate;
+      gl.shadowMap.needsUpdate = true;
+    };
+  }, [gl, invalidate]);
+
+  useEffect(() => {
+    gl.shadowMap.needsUpdate = true;
+    invalidate();
+    const settledShadow = window.setTimeout(() => {
+      gl.shadowMap.needsUpdate = true;
+      invalidate();
+    }, 480);
+    return () => window.clearTimeout(settledShadow);
+  }, [gl, invalidate, shadowRevision]);
+
+  return null;
+}
+
 function CameraRig({
   view,
   selectedModuleId,
   focusRevision,
   controlsRef,
+  zonePositions,
 }: Pick<SceneProps, "view" | "selectedModuleId" | "focusRevision"> & {
   controlsRef: RefObject<OrbitControlsImpl | null>;
+  zonePositions: ZonePositionMap;
 }) {
   const { camera, size } = useThree();
   const destination = useRef(new THREE.Vector3());
@@ -116,8 +160,8 @@ function CameraRig({
     } else if (view === "structure") {
       destination.current.set(0, narrow ? 7 : 5.4, narrow ? 20 : 12.8);
       target.current.set(0, 1.05, 0);
-    } else if (selectedModuleId && ZONE_POSITIONS[selectedModuleId]) {
-      const [x, y, z] = ZONE_POSITIONS[selectedModuleId];
+    } else if (selectedModuleId && zonePositions[selectedModuleId]) {
+      const [x, y, z] = zonePositions[selectedModuleId];
       target.current.set(x, y + 0.92, z);
       destination.current.set(x, y + (narrow ? 4.2 : 3.15), z + (narrow ? 8.8 : 6.15));
     } else {
@@ -125,7 +169,7 @@ function CameraRig({
       target.current.set(0, 1.2, 0);
     }
     animating.current = true;
-  }, [focusRevision, selectedModuleId, size.height, size.width, view]);
+  }, [focusRevision, selectedModuleId, size.height, size.width, view, zonePositions]);
 
   useFrame((_, delta) => {
     const controls = controlsRef.current;
@@ -177,8 +221,165 @@ function Dome({ visualStyle, locale, onSelect }: { visualStyle: "detailed" | "si
   );
 }
 
+interface RootSpiritParticle {
+  curveIndex: number;
+  offset: number;
+  speed: number;
+  lift: number;
+  phase: number;
+}
+
+function RootSpiritFlow({
+  curves,
+  detailed,
+  reducedMotion,
+}: {
+  curves: THREE.CatmullRomCurve3[];
+  detailed: boolean;
+  reducedMotion: boolean;
+}) {
+  const particleCount = detailed ? 54 : 18;
+  const sample = useRef(new THREE.Vector3());
+  const { geometry, particles } = useMemo(() => {
+    const seeds: RootSpiritParticle[] = Array.from({ length: particleCount }, (_, index) => ({
+      curveIndex: index % curves.length,
+      offset: ((index * 0.61803398875) + (index % 5) * 0.07) % 1,
+      speed: 0.045 + (index % 7) * 0.006,
+      lift: 0.07 + (index % 4) * 0.025,
+      phase: index * 1.73,
+    }));
+    const positions = new Float32Array(particleCount * 3);
+    const point = new THREE.Vector3();
+    seeds.forEach((seed, index) => {
+      curves[seed.curveIndex].getPointAt(1 - seed.offset, point);
+      positions[index * 3] = point.x;
+      positions[index * 3 + 1] = point.y + seed.lift;
+      positions[index * 3 + 2] = point.z;
+    });
+    const nextGeometry = new THREE.BufferGeometry();
+    const attribute = new THREE.Float32BufferAttribute(positions, 3);
+    attribute.setUsage(THREE.DynamicDrawUsage);
+    nextGeometry.setAttribute("position", attribute);
+    return { geometry: nextGeometry, particles: seeds };
+  }, [curves, particleCount]);
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  useFrame(({ clock }) => {
+    if (reducedMotion) return;
+    const positions = geometry.getAttribute("position") as THREE.BufferAttribute;
+    particles.forEach((particle, index) => {
+      const travelled = (clock.elapsedTime * particle.speed + particle.offset) % 1;
+      curves[particle.curveIndex].getPointAt(1 - travelled, sample.current);
+      positions.setXYZ(
+        index,
+        sample.current.x,
+        sample.current.y + particle.lift + Math.sin(clock.elapsedTime * 1.4 + particle.phase) * 0.018,
+        sample.current.z,
+      );
+    });
+    positions.needsUpdate = true;
+  });
+
+  return (
+    <group>
+      <points geometry={geometry} renderOrder={8}>
+        <pointsMaterial
+          color="#ffbd55"
+          size={detailed ? 0.24 : 0.2}
+          sizeAttenuation
+          transparent
+          opacity={detailed ? 0.2 : 0.14}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </points>
+      <points geometry={geometry} renderOrder={9}>
+        <pointsMaterial
+          color="#ffe08a"
+          size={detailed ? 0.115 : 0.14}
+          sizeAttenuation
+          transparent
+          opacity={0.9}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </points>
+    </group>
+  );
+}
+
+interface TreeSpiritParticle {
+  angle: number;
+  offset: number;
+  radius: number;
+  speed: number;
+  sway: number;
+}
+
+function TreeSpiritMotes({ detailed, reducedMotion }: { detailed: boolean; reducedMotion: boolean }) {
+  const particleCount = detailed ? 34 : 12;
+  const { geometry, particles } = useMemo(() => {
+    const seeds: TreeSpiritParticle[] = Array.from({ length: particleCount }, (_, index) => ({
+      angle: index * 2.399963,
+      offset: (index * 0.381966) % 1,
+      radius: 0.38 + (index % 8) * (detailed ? 0.12 : 0.1),
+      speed: 0.018 + (index % 5) * 0.004,
+      sway: 0.12 + (index % 4) * 0.04,
+    }));
+    const positions = new Float32Array(particleCount * 3);
+    seeds.forEach((seed, index) => {
+      const progress = seed.offset;
+      const angle = seed.angle + progress * 1.8;
+      positions[index * 3] = Math.cos(angle) * seed.radius;
+      positions[index * 3 + 1] = 0.32 + progress * 6.15;
+      positions[index * 3 + 2] = Math.sin(angle) * seed.radius;
+    });
+    const nextGeometry = new THREE.BufferGeometry();
+    const attribute = new THREE.Float32BufferAttribute(positions, 3);
+    attribute.setUsage(THREE.DynamicDrawUsage);
+    nextGeometry.setAttribute("position", attribute);
+    return { geometry: nextGeometry, particles: seeds };
+  }, [detailed, particleCount]);
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  useFrame(({ clock }) => {
+    if (reducedMotion) return;
+    const positions = geometry.getAttribute("position") as THREE.BufferAttribute;
+    particles.forEach((particle, index) => {
+      const progress = (clock.elapsedTime * particle.speed + particle.offset) % 1;
+      const angle = particle.angle + progress * 1.8 + clock.elapsedTime * 0.055;
+      const radius = particle.radius * (0.82 + progress * 0.34);
+      positions.setXYZ(
+        index,
+        Math.cos(angle) * radius + Math.sin(clock.elapsedTime * 0.32 + particle.angle) * particle.sway,
+        0.32 + progress * 6.15,
+        Math.sin(angle) * radius + Math.cos(clock.elapsedTime * 0.29 + particle.angle) * particle.sway,
+      );
+    });
+    positions.needsUpdate = true;
+  });
+
+  return (
+    <points geometry={geometry} renderOrder={8}>
+      <pointsMaterial
+        color="#fff0ad"
+        size={detailed ? 0.095 : 0.12}
+        sizeAttenuation
+        transparent
+        opacity={0.76}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+        toneMapped={false}
+      />
+    </points>
+  );
+}
+
 function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: "detailed" | "simple"; locale: Locale; growthProgress: number; onSelect: () => void }) {
   const detailed = visualStyle === "detailed";
+  const reducedMotion = useReducedMotion();
   const leafPositions = useMemo(() => {
     const points: Array<[number, number, number, number]> = [];
     const count = detailed ? 64 : 16;
@@ -249,6 +450,8 @@ function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: 
           <meshStandardMaterial color={index % 3 === 0 ? "#6b4932" : "#76563a"} roughness={0.92} />
         </mesh>
       ))}
+      <RootSpiritFlow curves={roots} detailed={detailed} reducedMotion={reducedMotion} />
+      <TreeSpiritMotes detailed={detailed} reducedMotion={reducedMotion} />
       <mesh position={[0, 2.35, 0]} castShadow>
         <cylinderGeometry args={[detailed ? 0.76 : 0.72, detailed ? 1.38 : 1.15, 5.15, detailed ? 24 : 7]} />
         <meshStandardMaterial color={detailed ? "#69472f" : "#765137"} roughness={0.9} />
@@ -363,7 +566,7 @@ function Tree({ visualStyle, locale, growthProgress, onSelect }: { visualStyle: 
         </group>
       ))}
       <pointLight position={[0, 4.5, 0]} color="#ffd36b" intensity={detailed ? 5.5 : 3.4} distance={9} />
-      <Sparkles count={detailed ? 66 : 28} scale={[5.5, 6.5, 5.5]} size={detailed ? 1.8 : 2.4} speed={0.22} color="#ffe59a" />
+      <Sparkles count={detailed ? 66 : 28} scale={[5.5, 6.5, 5.5]} size={detailed ? 1.8 : 2.4} speed={reducedMotion ? 0 : 0.22} color="#ffe59a" />
       <Html position={[0, 7.55, 0]} center distanceFactor={11} zIndexRange={[19, 0]}>
         <button className="world-landmark-label tree-label" onClick={onSelect}>{t(locale, "structure.tree")}</button>
       </Html>
@@ -700,6 +903,30 @@ function ReceiptGlyph({ color, detailed }: { color: string; detailed: boolean })
   );
 }
 
+function GenericOrganGlyph({ moduleId, color, detailed }: { moduleId: string; color: string; detailed: boolean }) {
+  const hash = stableIdHash(moduleId);
+  const sides = 5 + (hash % 4);
+  const rotation = ((hash % 360) * Math.PI) / 180;
+  return (
+    <group position={[0, 0.88, 0]} rotation={[0.12, rotation, 0]}>
+      <mesh castShadow>
+        <dodecahedronGeometry args={[detailed ? 0.62 : 0.54, detailed ? 1 : 0]} />
+        <meshStandardMaterial color="#d9efe6" emissive={color} emissiveIntensity={0.32} roughness={0.42} metalness={0.12} />
+      </mesh>
+      <mesh rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.82, 0.045, sides, detailed ? 40 : 20]} />
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.82} transparent opacity={0.82} />
+      </mesh>
+      {detailed && (
+        <mesh rotation={[0.45, 0.3, Math.PI / 2]}>
+          <torusGeometry args={[0.95, 0.025, 7, 40]} />
+          <meshBasicMaterial color="#f4fff9" transparent opacity={0.52} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
 function OrganGlyph({ moduleId, color, detailed }: { moduleId: string; color: string; detailed: boolean }) {
   if (moduleId === "seed-memory") return <SeedGlyph color={color} detailed={detailed} />;
   if (moduleId === "brain") return <BrainGlyph color={color} detailed={detailed} />;
@@ -707,7 +934,8 @@ function OrganGlyph({ moduleId, color, detailed }: { moduleId: string; color: st
   if (moduleId === "evolution") return <EvolutionGlyph color={color} detailed={detailed} />;
   if (moduleId === "roles") return <RolesGlyph color={color} detailed={detailed} />;
   if (moduleId === "resources") return <ResourceGlyph color={color} detailed={detailed} />;
-  return <ReceiptGlyph color={color} detailed={detailed} />;
+  if (moduleId === "receipts") return <ReceiptGlyph color={color} detailed={detailed} />;
+  return <GenericOrganGlyph moduleId={moduleId} color={color} detailed={detailed} />;
 }
 
 function OrganSanctuary({ moduleId, color, activityActive }: { moduleId: string; color: string; activityActive: boolean }) {
@@ -788,22 +1016,41 @@ function OrganSanctuary({ moduleId, color, activityActive }: { moduleId: string;
       </group>
     );
   }
-  return (
+  if (moduleId === "receipts") return (
     <group>
       {[-1.25, -0.86, 0.86, 1.25].map((x, index) => <mesh key={x} position={[x, 0.55 + (index % 2) * 0.15, -0.18]} rotation={[0, (index - 1.5) * 0.12, 0]}><boxGeometry args={[0.24, 0.82, 0.14]} /><meshStandardMaterial color={index % 2 ? "#9aa695" : "#78887d"} emissive={color} emissiveIntensity={activityActive ? 0.32 : 0.08} roughness={0.92} /></mesh>)}
     </group>
   );
+  return (
+    <group rotation={[0, ((stableIdHash(moduleId) % 90) * Math.PI) / 180, 0]}>
+      {[0.88, 1.22].map((radius, index) => (
+        <mesh key={radius} position={[0, 0.32 + index * 0.08, 0]} rotation={[-Math.PI / 2, index * 0.34, 0]}>
+          <torusGeometry args={[radius, 0.025 + index * 0.012, 7, 42]} />
+          {ringMaterial}
+        </mesh>
+      ))}
+      {Array.from({ length: 5 }, (_, index) => {
+        const angle = index * Math.PI * 2 / 5;
+        return (
+          <mesh key={index} position={[Math.cos(angle) * 1.28, 0.42, Math.sin(angle) * 1.28]} scale={[0.11, 0.22, 0.11]}>
+            <octahedronGeometry args={[1, 0]} />
+            {ringMaterial}
+          </mesh>
+        );
+      })}
+    </group>
+  );
 }
 
-function RootPaths({ activeModuleIds }: { activeModuleIds: string[] }) {
-  const paths = useMemo(() => Object.entries(ZONE_POSITIONS).map(([moduleId, [x, , z]], index) => ({
+function RootPaths({ activeModuleIds, zonePositions }: { activeModuleIds: string[]; zonePositions: ZonePositionMap }) {
+  const paths = useMemo(() => Object.entries(zonePositions).map(([moduleId, [x, , z]], index) => ({
     moduleId,
     curve: new THREE.CatmullRomCurve3([
       new THREE.Vector3(0, 0.11, 0),
       new THREE.Vector3(x * 0.45 + Math.sin(index) * 0.5, 0.12, z * 0.45 + Math.cos(index) * 0.5),
       new THREE.Vector3(x, 0.14, z),
     ]),
-  })), []);
+  })), [zonePositions]);
   return (
     <group>
       {paths.map(({ moduleId, curve }) => {
@@ -883,6 +1130,7 @@ function SanctuaryPlatform({
 
 function Zone({
   module,
+  position,
   locale,
   visualStyle,
   selected,
@@ -890,13 +1138,13 @@ function Zone({
   onSelect,
 }: {
   module: ModuleHealth;
+  position: ZonePosition;
   locale: Locale;
   visualStyle: "detailed" | "simple";
   selected: boolean;
   activityActive: boolean;
   onSelect: () => void;
 }) {
-  const position = ZONE_POSITIONS[module.id] ?? [0, 0.4, 0];
   const color = STATUS_COLORS[module.health.status] ?? STATUS_COLORS.unknown;
   const sanctuaryStone = {
     "seed-memory": "#707a5c", brain: "#756f7f", hooks: "#667c75", evolution: "#80765c",
@@ -955,16 +1203,16 @@ function Zone({
       <Html position={[0, 2.08, 0]} center distanceFactor={11} zIndexRange={[20, 0]}>
         <button className={`scene-label ${selected ? "is-selected" : ""}`} onClick={onSelect}>
           <span className="status-dot" data-status={module.health.status} />
-          {moduleName(locale, module.id)}
+          {moduleName(locale, module.id, module.name)}
         </button>
       </Html>
     </group>
   );
 }
 
-function connectionCurve(connection: CanopyConnection): THREE.CatmullRomCurve3 {
-  const source = new THREE.Vector3(...(ZONE_POSITIONS[connection.source] ?? [0, 0, 0])).add(new THREE.Vector3(0, 0.95, 0));
-  const target = new THREE.Vector3(...(ZONE_POSITIONS[connection.target] ?? [0, 0, 0])).add(new THREE.Vector3(0, 0.95, 0));
+function connectionCurve(connection: CanopyConnection, zonePositions: ZonePositionMap): THREE.CatmullRomCurve3 {
+  const source = new THREE.Vector3(...zonePositions[connection.source]).add(new THREE.Vector3(0, 0.95, 0));
+  const target = new THREE.Vector3(...zonePositions[connection.target]).add(new THREE.Vector3(0, 0.95, 0));
   const midpoint = source.clone().lerp(target, 0.5);
   const direction = target.clone().sub(source);
   const perpendicular = new THREE.Vector3(-direction.z, 0, direction.x).normalize();
@@ -978,18 +1226,20 @@ function connectionCurve(connection: CanopyConnection): THREE.CatmullRomCurve3 {
 
 function ConnectionArc({
   connection,
+  zonePositions,
   selectedModuleId,
   locale,
   visualStyle,
   activityActive,
 }: {
   connection: CanopyConnection;
+  zonePositions: ZonePositionMap;
   selectedModuleId: string;
   locale: Locale;
   visualStyle: "detailed" | "simple";
   activityActive: boolean;
 }) {
-  const curve = useMemo(() => connectionCurve(connection), [connection]);
+  const curve = useMemo(() => connectionCurve(connection, zonePositions), [connection, zonePositions]);
   const color = STATUS_COLORS[connection.health.status] ?? STATUS_COLORS.unknown;
   const adjacent = connection.source === selectedModuleId || connection.target === selectedModuleId;
   const detailed = visualStyle === "detailed";
@@ -1019,7 +1269,7 @@ function ConnectionArc({
       const offset = reducedMotion
         ? 0.25 + index * 0.38
         : (clock.elapsedTime * ((activityActive ? 0.09 : 0.055) + connection.signal.strength * 0.035) + hashOffset + index * 0.42) % 1;
-      signal.position.copy(curve.getPoint(offset));
+      curve.getPoint(offset, signal.position);
       const arriving = offset > 0.82 ? (offset - 0.82) / 0.18 : 0;
       signal.scale.setScalar(1 - arriving * 0.84);
       absorption = Math.max(absorption, arriving);
@@ -1099,12 +1349,14 @@ function ConnectionArc({
 
 function ConnectionNetwork({
   connections,
+  zonePositions,
   selectedModuleId,
   locale,
   visualStyle,
   activeModuleIds,
 }: Pick<SceneProps, "connections" | "selectedModuleId" | "locale" | "activeModuleIds"> & {
   visualStyle: "detailed" | "simple";
+  zonePositions: ZonePositionMap;
 }) {
   return (
     <group>
@@ -1112,6 +1364,7 @@ function ConnectionNetwork({
         <ConnectionArc
           key={connection.id}
           connection={connection}
+          zonePositions={zonePositions}
           selectedModuleId={selectedModuleId}
           locale={locale}
           visualStyle={visualStyle}
@@ -1268,7 +1521,7 @@ function StructureBranch({ start, end, index }: { start: THREE.Vector3; end: THR
   useFrame(({ clock }) => {
     if (!signal.current) return;
     const offset = reducedMotion ? 0.62 : (clock.elapsedTime * 0.12 + index * 0.17) % 1;
-    signal.current.position.copy(curve.getPoint(offset));
+    curve.getPoint(offset, signal.current.position);
   });
   return (
     <group>
@@ -1365,8 +1618,18 @@ function StructureNetwork({
 function World(props: SceneProps) {
   const visualStyle = props.backgroundMode === "detailed" ? "detailed" : "simple";
   const detailedWorld = props.backgroundMode === "detailed";
+  const reducedMotion = useReducedMotion();
+  const zonePositions = useMemo(() => buildZonePositions(props.modules), [props.modules]);
   const { size } = useThree();
   const narrowViewport = size.width / Math.max(size.height, 1) < 0.72;
+  const shadowRevision = [
+    props.backgroundMode,
+    props.view,
+    props.selectedModuleId,
+    props.selectedCardId,
+    props.selectedStructureId,
+    Math.round(props.growthProgress * 100),
+  ].join(":");
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const interactionOrigin = useRef<{ camera: THREE.Vector3; target: THREE.Vector3 } | null>(null);
   const interactionClosedPanel = useRef(false);
@@ -1395,6 +1658,7 @@ function World(props: SceneProps) {
   }
   return (
     <>
+      <SceneRenderBudget shadowRevision={shadowRevision} />
       <fog attach="fog" args={[detailedWorld ? "#426756" : "#bfe4d5", narrowViewport ? 50 : detailedWorld ? 30 : 22, narrowViewport ? 80 : detailedWorld ? 58 : 42]} />
       <ambientLight intensity={detailedWorld ? 0.58 : 0.86} />
       <hemisphereLight args={[detailedWorld ? "#d9f2e8" : "#d9f8ff", detailedWorld ? "#183f30" : "#22543d", detailedWorld ? 0.96 : 1.45]} />
@@ -1404,6 +1668,7 @@ function World(props: SceneProps) {
         selectedModuleId={props.selectedModuleId}
         focusRevision={props.focusRevision}
         controlsRef={controlsRef}
+        zonePositions={zonePositions}
       />
       {props.backgroundMode !== "none" && props.view !== "structure" && (
         <>
@@ -1424,14 +1689,23 @@ function World(props: SceneProps) {
               <pointLight color="#ffd36b" intensity={12} distance={8} />
             </group>
           )}
+          <Sparkles
+            count={detailedWorld ? 58 : 18}
+            position={[0, 6.4, -1.5]}
+            scale={detailedWorld ? [19, 11, 19] : [13, 7, 13]}
+            size={detailedWorld ? 1.05 : 1.2}
+            speed={reducedMotion ? 0 : detailedWorld ? 0.07 : 0.04}
+            color="#fff1b8"
+          />
         </>
       )}
       {props.view === "overview" && (
-        <>{props.backgroundMode === "detailed" && <RootPaths activeModuleIds={props.activeModuleIds} />}</>
+        <>{props.backgroundMode === "detailed" && <RootPaths activeModuleIds={props.activeModuleIds} zonePositions={zonePositions} />}</>
       )}
       {props.view === "overview" && (
         <ConnectionNetwork
           connections={props.connections}
+          zonePositions={zonePositions}
           selectedModuleId={props.selectedModuleId}
           locale={props.locale}
           visualStyle={visualStyle}
@@ -1442,6 +1716,7 @@ function World(props: SceneProps) {
         <Zone
           key={module.id}
           module={module}
+          position={zonePositions[module.id]}
           locale={props.locale}
           visualStyle={visualStyle}
           selected={module.id === props.selectedModuleId}
@@ -1491,10 +1766,13 @@ export function CanopyScene(props: SceneProps) {
   return (
     <Canvas
       className="canopy-canvas"
+      data-render-policy="adaptive-idle-30"
+      data-shadow-policy="state-driven"
+      frameloop="demand"
       shadows
       dpr={[1, 1.65]}
       camera={{ position: [0, 8.4, 18.8], fov: 43, near: 0.1, far: 80 }}
-      gl={{ antialias: true, powerPreference: "high-performance", alpha: true }}
+      gl={{ antialias: true, powerPreference: "default", alpha: true }}
       events={(state) => ({
         ...createPointerEvents(state),
         filter: prioritizeIntersections,

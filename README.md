@@ -41,6 +41,7 @@ canopy observatory
 ```bash
 ./observatory doctor --canopy-root /path/to/Canopy
 ./observatory start --canopy-root /path/to/Canopy
+./observatory sync --canopy-root /path/to/Canopy
 ./observatory stop
 ./observatory update --canopy-root /path/to/Canopy
 ./observatory uninstall
@@ -48,6 +49,23 @@ canopy observatory
 
 `uninstall` removes generated local runtime data and dependencies from this
 checkout. It does not remove Canopy, Seed Memory, or this Git repository.
+
+The Living System normally synchronizes in the background. The UI action
+**Sync living system** forces the same bounded refresh and reports how many
+living units and connections were verified. `./observatory sync` is the CLI
+fallback for maintenance or diagnosis; an invalid graph never replaces the
+last verified SQLite projection.
+
+## Topology Sync
+
+Canopy owns the source graph through its versioned public snapshot contract.
+This repository validates and projects that graph; it does not maintain a
+second module or connection catalog. Unknown module IDs receive a deterministic
+generic position and visual automatically, while bespoke art remains optional.
+
+The canonical maintenance request is **“重新同步生命體”**. Its exact contract,
+provider checklist, validation gates, and recovery behavior are documented in
+[`docs/topology-sync-contract.md`](docs/topology-sync-contract.md).
 
 ## Development
 

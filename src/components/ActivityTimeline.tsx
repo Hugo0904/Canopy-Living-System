@@ -63,7 +63,7 @@ export function ActivityTimeline({ activity, modules, locale, selectedDate, play
           const count = selectedDay?.module_counts[module.id] ?? 0;
           return (
             <button key={module.id} className={count ? "is-active" : ""} disabled={!count} onClick={() => onSelectModule(module.id)}>
-              <i data-status={module.health.status} /><span>{moduleName(locale, module.id)}</span><strong>{count}</strong>
+              <i data-status={module.health.status} /><span>{moduleName(locale, module.id, module.name)}</span><strong>{count}</strong>
             </button>
           );
         })}

@@ -55,6 +55,71 @@ async function pointerClick(page, locator) {
   await page.mouse.click(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5);
 }
 
+async function cloudLayerStyle(page) {
+  return page.locator(".app-shell").evaluate((element) => {
+    const style = getComputedStyle(element, "::before");
+    return { animationName: style.animationName, opacity: Number(style.opacity) };
+  });
+}
+
+async function installWebglCounter(page) {
+  await page.addInitScript(() => {
+    const counter = { clears: 0, draws: 0 };
+    Object.defineProperty(globalThis, "__canopyWebglCounter", { value: counter, configurable: false });
+    const patch = (prototype, method, field) => {
+      if (!prototype) return;
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
+      if (!descriptor || typeof descriptor.value !== "function") return;
+      const original = descriptor.value;
+      try {
+        Object.defineProperty(prototype, method, {
+          ...descriptor,
+          value(...args) {
+            counter[field] += 1;
+            return Reflect.apply(original, this, args);
+          },
+        });
+      } catch {
+        // The counter is diagnostic only; unsupported WebGL descriptors must
+        // not prevent the application itself from loading.
+      }
+    };
+    const prototypes = [
+      globalThis.WebGLRenderingContext?.prototype,
+      globalThis.WebGL2RenderingContext?.prototype,
+    ];
+    prototypes.forEach((prototype) => {
+      patch(prototype, "clear", "clears");
+      patch(prototype, "drawArrays", "draws");
+      patch(prototype, "drawElements", "draws");
+      patch(prototype, "drawArraysInstanced", "draws");
+      patch(prototype, "drawElementsInstanced", "draws");
+    });
+  });
+}
+
+async function verifyRenderBudget(page) {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await prepare(page, { background: "detailed" });
+  const sampleMs = 3000;
+  const counterReady = await page.evaluate(() => {
+    const counter = globalThis.__canopyWebglCounter;
+    if (!counter) return false;
+    counter.clears = 0;
+    counter.draws = 0;
+    return true;
+  });
+  await page.waitForTimeout(sampleMs);
+  const counter = await page.evaluate(() => ({ ...globalThis.__canopyWebglCounter }));
+  const idleClearRate = counter.clears * 1000 / sampleMs;
+  const drawCallRate = counter.draws * 1000 / sampleMs;
+  const failures = [];
+  if (!counterReady) failures.push("WebGL render counter could not be installed");
+  if (idleClearRate > 42) failures.push(`idle WebGL redraw rate remained too high: ${idleClearRate.toFixed(1)}/s`);
+  if (idleClearRate < 20) failures.push(`idle WebGL animation redraw rate was too low: ${idleClearRate.toFixed(1)}/s`);
+  return { sampleMs, clearCalls: counter.clears, drawCalls: counter.draws, idleClearRate, drawCallRate, failures };
+}
+
 async function clickOrganBody(page, name, viewportWidth) {
   const label = page.getByRole("button", { name, exact: true });
   const bounds = await label.boundingBox();
@@ -138,6 +203,8 @@ async function verifyControls(page) {
   await prepare(page);
   const failures = [];
   const scene = page.locator(".scene-stage");
+  const renderSurface = page.locator('[data-render-policy="adaptive-idle-30"][data-shadow-policy="state-driven"]');
+  if (await renderSurface.count() !== 1) failures.push("adaptive render and shadow budgets were not active");
   const connectionCount = Number(await scene.getAttribute("data-architecture-connections"));
   if (connectionCount !== 11) failures.push(`expected 11 architecture connections, got ${connectionCount}`);
   await clickControl(page.getByRole("button", { name: "Seed 大腦", exact: true }).first());
@@ -162,13 +229,19 @@ async function verifyControls(page) {
   if ((await page.locator(".app-shell").getAttribute("data-background")) !== "simple") failures.push("simple background was not applied");
   if ((await scene.getAttribute("data-world-tree")) !== "simple") failures.push("simple tree contract was not applied");
   if ((await scene.getAttribute("data-ancient-ruins")) !== "hidden") failures.push("ruins leaked into simple mode");
+  const simpleAtmosphere = await cloudLayerStyle(page);
+  if (simpleAtmosphere.animationName !== "none" || simpleAtmosphere.opacity > 0.01) failures.push("full drifting clouds leaked into simple mode");
   await clickControl(page.getByRole("button", { name: "純淨模式", exact: true }));
   if ((await page.locator(".app-shell").getAttribute("data-background")) !== "none") failures.push("no-background mode was not applied");
   if ((await scene.getAttribute("data-world-tree")) !== "none") failures.push("tree leaked into no-background mode");
   if ((await scene.getAttribute("data-ancient-ruins")) !== "hidden") failures.push("ruins leaked into no-background mode");
+  const cleanAtmosphere = await cloudLayerStyle(page);
+  if (cleanAtmosphere.animationName !== "none" || cleanAtmosphere.opacity > 0.01) failures.push("atmosphere leaked into no-background mode");
   await clickControl(page.getByRole("button", { name: "古樹遺跡", exact: true }));
   if ((await scene.getAttribute("data-world-tree")) !== "detailed") failures.push("detailed tree contract was not applied");
   if ((await scene.getAttribute("data-ancient-ruins")) !== "visible") failures.push("ancient ruins contract was not applied");
+  const detailedAtmosphere = await cloudLayerStyle(page);
+  if (detailedAtmosphere.animationName !== "canopy-cloud-drift" || detailedAtmosphere.opacity < 0.25) failures.push("detailed drifting cloud layer was not active");
 
   const volume = page.getByRole("slider", { name: "背景音量" });
   await volume.fill("1");
@@ -210,7 +283,7 @@ async function verifyControls(page) {
   await clickControl(page.getByRole("button", { name: "進入根系記憶" }).first());
   await page.getByText("讓新工具延續既有習慣", { exact: true }).first().waitFor({ timeout: 10000 });
   await page.getByText("seed.capability.map_new_tools_to_habits", { exact: true }).first().waitFor({ timeout: 10000 });
-  return { connectionCount, flowLabels, detailFlows, musicOptionCount, audioAssetsReady, failures };
+  return { connectionCount, flowLabels, detailFlows, musicOptionCount, audioAssetsReady, detailedAtmosphere, failures };
 }
 
 async function verifyNarrowMusicSettings(page) {
@@ -422,14 +495,21 @@ async function verifyLifeStream(page) {
   if (apiContract.retentionDays !== 60) failures.push(`life event retention was ${apiContract.retentionDays}`);
   if (apiContract.containsRawToolInput) failures.push("life event API leaked raw tool input or response");
 
-  await clickControl(panel.locator(".life-event-main").first());
+  const inspectableTurn = panel.locator('.life-event[data-kind="turn"]').first();
+  await clickControl(inspectableTurn.locator(".life-event-main"));
   await page.waitForTimeout(350);
-  const eventDetails = panel.locator(".life-event-details").first();
+  const eventDetails = inspectableTurn.locator(".life-event-details");
   const eventDetailsVisible = await eventDetails.isVisible().catch(() => false);
   const eventDetailsText = eventDetailsVisible ? await eventDetails.innerText() : "";
+  const learningStatus = inspectableTurn.locator(".life-learning-status");
+  const learningStatusVisible = await learningStatus.isVisible().catch(() => false);
+  const learningStatusText = learningStatusVisible ? await learningStatus.innerText() : "";
   if (!eventDetailsVisible) failures.push("clicking a life event did not reveal its turn details");
   if (eventDetailsVisible && !eventDetailsText.includes("實際幫了什麼") && !eventDetailsText.includes("實際驗證")) {
     failures.push("life event details do not explain assistance or verification");
+  }
+  if (!learningStatusVisible || !learningStatusText.includes("本回合學習判定")) {
+    failures.push("life event details do not distinguish learning from ordinary completion");
   }
   const detail = page.locator(".detail-panel");
   const desktopPeekWithDetail = page.locator(".life-stream-peek");
@@ -468,7 +548,7 @@ async function verifyLifeStream(page) {
   await page.waitForTimeout(350);
   const narrowSelection = await page.locator(".detail-panel h2").innerText().catch(() => "");
   if (narrowSelection !== "Seed 大腦") failures.push(`collapsed narrow life history prevented 3D selection: ${narrowSelection || "nothing"}`);
-  return { desktopPeekBounds, desktopPeekWithDetailBounds, eventCount, learningCount, retentionCopy, apiContract, eventDetailsVisible, narrowSelection, failures };
+  return { desktopPeekBounds, desktopPeekWithDetailBounds, eventCount, learningCount, retentionCopy, apiContract, eventDetailsVisible, learningStatusVisible, learningStatusText, narrowSelection, failures };
 }
 
 async function inspect(page, name, viewport, { enterSeed = false, enterTimeline = false, background = "detailed" } = {}) {
@@ -541,6 +621,7 @@ const browser = await chromium.launch({
 });
 try {
   const page = await browser.newPage();
+  await installWebglCounter(page);
   const runtimeErrors = [];
   page.on("pageerror", (error) => {
     runtimeErrors.push(`pageerror: ${error.message}`);
@@ -556,6 +637,7 @@ try {
     console.error(`[visual] ${name}`);
     return operation();
   };
+  const renderBudget = await runStage("render-budget", () => verifyRenderBudget(page));
   const zoom = await runStage("zoom", () => verifyZoomPersistence(page));
   const controls = await runStage("controls", () => verifyControls(page));
   const musicLayout = await runStage("music-layout", () => verifyNarrowMusicSettings(page));
@@ -576,6 +658,7 @@ try {
   }
   const failures = [
     ...results.flatMap((result) => result.failures.map((failure) => `${result.name}: ${failure}`)),
+    ...renderBudget.failures.map((failure) => `render-budget: ${failure}`),
     ...zoom.failures.map((failure) => `desktop-zoom: ${failure}`),
     ...controls.failures.map((failure) => `controls: ${failure}`),
     ...musicLayout.failures.map((failure) => `music-layout: ${failure}`),
@@ -584,7 +667,7 @@ try {
     ...lifeStream.failures.map((failure) => `life-stream: ${failure}`),
     ...runtimeErrors,
   ];
-  console.log(JSON.stringify({ status: failures.length ? "FAIL" : "PASS", zoom, controls, musicLayout, picking, activity, lifeStream, results, failures }, null, 2));
+  console.log(JSON.stringify({ status: failures.length ? "FAIL" : "PASS", renderBudget, zoom, controls, musicLayout, picking, activity, lifeStream, results, failures }, null, 2));
   if (failures.length) process.exitCode = 1;
 } finally {
   await browser.close();

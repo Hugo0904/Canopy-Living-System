@@ -13,6 +13,15 @@
 - Normal monitoring is deterministic and read-only. Do not add an LLM polling loop.
 - A UI action must not directly mutate Seed cards, Canopy governance, roles, receipts, or evidence logs. It creates a typed treatment request for the owning Canopy workflow.
 
+## Topology Synchronization
+
+- Canopy's versioned public snapshot is the only source of truth for top-level living units, internal structure, and connections. Do not add a parallel frontend or SQLite catalog.
+- Treat the instruction `重新同步生命體` as one bounded operation: read the public snapshot, validate the complete graph, atomically refresh the rebuildable projection only on success, regenerate deterministic generic layout for unknown IDs, and report module/connection deltas.
+- New public module IDs must render without a frontend release. Stable bespoke coordinates, icons, translations, and models are progressive enhancement only; their absence must fall back to a readable name, generic glyph, and collision-avoiding deterministic position.
+- Every declared connection must have a unique ID, valid source and target, non-self endpoint, and matching signal semantics. Every multi-module topology must connect every top-level module. Every structure node must be reachable from the declared root with one containing parent.
+- Automatic background synchronization is the default. The UI provides one explicit recovery action; `./observatory sync` is the documented CLI fallback. A failed or unavailable new topology must leave the last verified projection usable and must never affect Canopy Core operation.
+- Follow the provider/consumer checklist in `docs/topology-sync-contract.md` whenever a Canopy feature changes the public living-system graph.
+
 ## Data And Security
 
 - Bind the local service to `127.0.0.1` by default.
