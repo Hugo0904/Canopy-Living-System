@@ -40,7 +40,7 @@ exist. Later requests extend this list instead of replacing earlier items.
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| A01 | Multiple distinct, non-vocal, natural/acoustic/piano compositions. | Implemented | Five complete, locally hosted, licensed tracks normalized to -13 LUFS |
+| A01 | Multiple distinct, non-vocal, natural/acoustic/piano compositions. | Implemented | Nine complete, locally hosted and licensed tracks, including the original `Sakuya4` master with a non-destructive playback trim. |
 | A02 | Music selection changes the actual composition instead of replaying one short arrangement. | Implemented | `ambientBgm.ts` maps every choice to a distinct 85-235 second track and crossfades on change |
 | A03 | BGM track, volume, and enabled state survive reload; enabled BGM starts on the first allowed gesture. | Implemented | `localStorage`, hidden observable audio element, and browser activation listener |
 | A04 | Buttons have restrained interaction sound. | Implemented | `playUiClick()` |

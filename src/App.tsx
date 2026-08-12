@@ -91,7 +91,7 @@ const BACKGROUNDS: BackgroundMode[] = ["detailed", "simple", "none"];
 const VISUAL_EFFECT_KEYS: VisualEffectKey[] = ["particles", "flow", "clouds", "glow", "motion"];
 const MUSIC_TRACKS: AmbientTrackId[] = [
   "sacred-grove",
-  "resonant-chimes",
+  "sakuya4",
   "shrine-ritual",
   "ancient-temple",
   "greenhouse",
@@ -661,7 +661,15 @@ function SettingsPanel({
 export default function App() {
   const [locale, setLocale] = useState<Locale>(() => storedChoice("canopy.locale", LOCALES, "zh-TW"));
   const [backgroundMode, setBackgroundMode] = useState<BackgroundMode>(() => storedChoice("canopy.background", BACKGROUNDS, "detailed"));
-  const [musicTrack, setMusicTrack] = useState<AmbientTrackId>(() => storedChoice("canopy.music", MUSIC_TRACKS, "meadow"));
+  const [musicTrack, setMusicTrack] = useState<AmbientTrackId>(() => {
+    const storedTrack = window.localStorage.getItem("canopy.music");
+    if (
+      storedTrack === "resonant-chimes"
+      || storedTrack === "finding-movement"
+      || storedTrack === "kagura-awakening"
+    ) return "sakuya4";
+    return storedChoice("canopy.music", MUSIC_TRACKS, "meadow");
+  });
   const [musicVolume, setMusicVolume] = useState(() => storedVolume("canopy.music.volume", 0.88));
   const [soundEffects, setSoundEffects] = useState(() => window.localStorage.getItem("canopy.sfx") !== "off");
   const [soundEffectVolume, setSoundEffectVolume] = useState(() => storedVolume("canopy.sfx.volume", 0.72));

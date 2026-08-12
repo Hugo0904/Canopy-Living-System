@@ -390,7 +390,7 @@ async function verifyControls(page) {
   const audioAssetsReady = await page.evaluate(async () => {
     const paths = [
       "/assets/audio/tracks/sacred-grove-bells.mp3",
-      "/assets/audio/tracks/resonant-chimes.mp3",
+      "/assets/audio/tracks/sakuya4.mp3",
       "/assets/audio/tracks/shrine-ritual.mp3",
       "/assets/audio/tracks/ancient-temple.mp3",
     ];
@@ -448,10 +448,21 @@ async function verifyNarrowMusicSettings(page) {
   ) {
     failures.push("last BGM choice is not reachable inside narrow settings");
   }
-  const resonantChimes = panel.getByRole("button", { name: "神鈴回響", exact: true });
-  await resonantChimes.scrollIntoViewIfNeeded();
-  await pointerClick(page, resonantChimes);
-  await page.waitForFunction(() => localStorage.getItem("canopy.music") === "resonant-chimes", null, { timeout: 10000 });
+  const sakuya4 = panel.getByRole("button", { name: "神域華開", exact: true });
+  await sakuya4.scrollIntoViewIfNeeded();
+  await pointerClick(page, sakuya4);
+  await page.waitForFunction(() => localStorage.getItem("canopy.music") === "sakuya4", null, { timeout: 10000 });
+  await page.waitForFunction(() => {
+    const audio = document.querySelector("audio[data-canopy-bgm='sakuya4']");
+    return audio instanceof HTMLAudioElement && audio.readyState >= HTMLMediaElement.HAVE_METADATA;
+  }, null, { timeout: 15000 });
+  const sakuyaPlaybackVolume = await page.evaluate(() => {
+    const audio = document.querySelector("audio[data-canopy-bgm='sakuya4']");
+    return audio instanceof HTMLAudioElement ? audio.volume : null;
+  });
+  if (sakuyaPlaybackVolume === null || Math.abs(sakuyaPlaybackVolume - 0.44) > 0.02) {
+    failures.push(`Sakuya4 safe playback trim is ${sakuyaPlaybackVolume ?? "missing"}, expected 0.44`);
+  }
   await clickControl(panel.getByRole("tab", { name: "特效", exact: true }));
   const finalEffect = panel.getByRole("switch", { name: "生命單元懸浮", exact: true });
   await finalEffect.scrollIntoViewIfNeeded();
@@ -462,7 +473,7 @@ async function verifyNarrowMusicSettings(page) {
   }));
   if (!finalEffectBounds || finalEffectBounds.x < 0 || finalEffectBounds.x + finalEffectBounds.width > 390) failures.push("narrow effects switches escape the settings panel");
   if (effectsPanelMetrics.scrollWidth > effectsPanelMetrics.clientWidth + 1) failures.push("narrow effects settings scroll horizontally");
-  return { panelBounds, lastTrackBounds, panelMetrics, finalEffectBounds, effectsPanelMetrics, failures };
+  return { panelBounds, lastTrackBounds, panelMetrics, sakuyaPlaybackVolume, finalEffectBounds, effectsPanelMetrics, failures };
 }
 
 async function verifyPickingAndNavigation(page) {

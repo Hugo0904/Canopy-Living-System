@@ -5,7 +5,7 @@ export type AmbientTrackId =
   | "clear-sky"
   | "sunlit-piano"
   | "sacred-grove"
-  | "resonant-chimes"
+  | "sakuya4"
   | "shrine-ritual"
   | "ancient-temple";
 
@@ -17,6 +17,7 @@ export interface AmbientTrackInfo {
   license: string;
   licenseUrl: string;
   sourceUrl: string;
+  playbackGain?: number;
 }
 
 export const AMBIENT_TRACKS: Record<AmbientTrackId, AmbientTrackInfo> = {
@@ -74,14 +75,15 @@ export const AMBIENT_TRACKS: Record<AmbientTrackId, AmbientTrackInfo> = {
     licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
     sourceUrl: "https://opengameart.org/content/shrine",
   },
-  "resonant-chimes": {
-    id: "resonant-chimes",
-    url: "/assets/audio/tracks/resonant-chimes.mp3",
-    title: "Wind Chimes Loop 2",
-    artist: "pmiller",
-    license: "CC0",
-    licenseUrl: "https://creativecommons.org/publicdomain/zero/1.0/",
-    sourceUrl: "https://opengameart.org/content/wind-chimes",
+  sakuya4: {
+    id: "sakuya4",
+    url: "/assets/audio/tracks/sakuya4.mp3",
+    title: "Sakuya4",
+    artist: "PeriTune · Sei Mutsuki",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://peritune.com/blog/2018/12/21/sakuya4/",
+    playbackGain: 0.5,
   },
   "shrine-ritual": {
     id: "shrine-ritual",
@@ -126,7 +128,7 @@ export class AmbientBgm {
 
   setVolume(value: number): void {
     this.volume = clampVolume(value);
-    if (this.audio) this.audio.volume = this.volume;
+    if (this.audio && this.trackId) this.audio.volume = this.playbackVolume(this.trackId);
   }
 
   getVolume(): number {
@@ -142,7 +144,7 @@ export class AmbientBgm {
         if (isAutoplayBlock(reason)) return false;
         throw reason;
       }
-      existing.volume = this.volume;
+      existing.volume = this.playbackVolume(trackId);
       return !existing.paused;
     }
 
@@ -165,7 +167,7 @@ export class AmbientBgm {
     this.audio = next;
     this.trackId = trackId;
     await Promise.all([
-      this.fade(next, 0, this.volume, CROSSFADE_MS, transitionId),
+      this.fade(next, 0, this.playbackVolume(trackId), CROSSFADE_MS, transitionId),
       existing ? this.fade(existing, existing.volume, 0, CROSSFADE_MS, transitionId) : Promise.resolve(),
     ]);
     if (existing) {
@@ -199,6 +201,10 @@ export class AmbientBgm {
     audio.style.display = "none";
     document.body.append(audio);
     return audio;
+  }
+
+  private playbackVolume(trackId: AmbientTrackId): number {
+    return clampVolume(this.volume * (ambientTrackInfo(trackId).playbackGain ?? 1));
   }
 
   private fade(

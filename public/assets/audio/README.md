@@ -16,12 +16,16 @@ lossy encoding.
     suzu phrases. The arrangement can be reproduced with
     `scripts/render_sacred_grove_bells.py`.
 
-- `tracks/resonant-chimes.mp3`
-  - "Wind Chimes Loop 2" by pmiller
-  - Source: https://opengameart.org/content/wind-chimes
-  - Source archive SHA-256: `db5e24a8f6b8e63fd78cbc6d524a3b48545a23e254296acadd0cd5c5ad18443f`
-  - License: CC0 1.0 Universal
-  - License: https://creativecommons.org/publicdomain/zero/1.0/
+- `tracks/sakuya4.mp3`
+  - "Sakuya4" by PeriTune / Sei Mutsuki
+  - Source: https://peritune.com/blog/2018/12/21/sakuya4/
+  - Source MP3 SHA-256: `311912b47c34bad39be99b3088554ae43b64f02f645a34eaab8cbfabbe20830c`
+  - Original 192 kbps MP3, included without musical or mastering changes.
+  - The player applies a `0.5` gain trim to this louder master so its peaks do
+    not dominate the rest of the playlist.
+  - License: Creative Commons Attribution 4.0 International
+  - License: https://creativecommons.org/licenses/by/4.0/
+  - Attribution: `"Sakuya4" PeriTune / Sei Mutsuki`
 - `tracks/shrine-ritual.mp3`
   - "Ritual" by brainiac256
   - Source: https://opengameart.org/content/ritual
