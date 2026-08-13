@@ -11,7 +11,9 @@
 - Prefer incremental reads, persisted snapshots, bounded retention, and background work. Do not add synchronous UI work, database access, network access, an LLM call, or full-history scanning to Canopy's critical path.
 - Operator Seed Memory remains local and private. Never copy it into Git fixtures, screenshots, analytics, or shared examples.
 - Normal monitoring is deterministic and read-only. Do not add an LLM polling loop.
+- Lifecycle integration may request only a named, Core-owned, allow-listed, local, idempotent, reversible repair and must require Core verification. The UI, SQLite projection, and background sync must never execute arbitrary repair commands or mark a Core finding resolved; install/start/update may reconcile optional managed hooks, and uninstall must restore the Core-only hook footprint before removing generated runtime.
 - A UI action must not directly mutate Seed cards, Canopy governance, roles, receipts, or evidence logs. It creates a typed treatment request for the owning Canopy workflow.
+- The life metaphor is a presentation boundary: user-facing UI may call a health action 「治療」, but adapters, API contracts, persisted identifiers, CLI commands, logs, and Core artifacts must translate it to canonical `remediation`, then classify the work as correction or optimization. The surface term never creates a second workflow, authority, or completion state.
 
 ## Topology Synchronization
 

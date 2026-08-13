@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -108,8 +109,36 @@ def node_tooling() -> tuple[list[str], dict[str, str]]:
 def require_success(result: subprocess.CompletedProcess[str], label: str) -> None:
     if result.returncode == 0:
         return
-    detail = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+    detail = "\n".join(
+        part for part in ((result.stderr or "").strip(), (result.stdout or "").strip()) if part
+    ) or f"exit code {result.returncode}"
     raise RuntimeError(f"{label} failed: {detail}")
+
+
+def reconcile_canopy_hooks(canopy_root: Path, *, mode: str) -> dict[str, object]:
+    """Ask the owning Canopy lifecycle to reconcile its managed Codex hooks."""
+    result = run(
+        [
+            sys.executable,
+            str(canopy_root / "canopy"),
+            "repair",
+            "codex-hooks",
+            "--mode",
+            mode,
+            "--json",
+        ],
+        timeout=60,
+    )
+    require_success(result, "Canopy managed-hook reconciliation")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Canopy managed-hook reconciliation returned invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("status") != "PASS":
+        raise RuntimeError("Canopy managed-hook reconciliation did not verify PASS")
+    return payload
 
 
 def install(canopy_root: Path) -> None:
@@ -146,6 +175,7 @@ def install(canopy_root: Path) -> None:
         timeout=120,
     )
     require_success(result, "database initialization")
+    reconcile_canopy_hooks(canopy_root, mode="installed")
 
 
 def build_frontend(
@@ -178,48 +208,71 @@ def process_alive(pid: int) -> bool:
     return True
 
 
-def endpoint_healthy(port: int) -> bool:
+def canopy_instance(canopy_root: Path) -> str:
+    return hashlib.sha256(str(canopy_root.resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+def endpoint_healthy(port: int, canopy_root: Path | None = None) -> bool:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError):
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+            if not isinstance(payload, dict) or payload.get("service") != "canopy-living-system":
+                return False
+            if canopy_root is None:
+                return True
+            # One-release compatibility lets an older local process be
+            # stopped safely by matching its exact (formerly exposed) root.
+            return (
+                payload.get("canopy_instance") == canopy_instance(canopy_root)
+                or payload.get("canopy_root") == str(canopy_root.resolve())
+            )
+    except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return False
 
 
-def running_runtime() -> dict[str, object]:
+def running_runtime(canopy_root: Path | None = None) -> dict[str, object]:
     runtime = load_runtime()
     try:
         pid = int(runtime.get("pid", 0))
         port = int(runtime.get("port", 0))
     except (TypeError, ValueError):
         return {}
-    return runtime if process_alive(pid) and endpoint_healthy(port) else {}
+    runtime_root = str(runtime.get("canopy_root", ""))
+    if canopy_root is not None and runtime_root != str(canopy_root.resolve()):
+        return {}
+    return runtime if process_alive(pid) and endpoint_healthy(port, canopy_root) else {}
 
 
 def available_port(preferred: int) -> int:
-    for port in range(preferred, preferred + 50):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            # Match uvicorn's reusable listener behavior so a clean restart
-            # returns to the requested port instead of drifting to 8766.
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-            return port
-    raise RuntimeError("No available localhost port found")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # Match uvicorn's reusable listener behavior so a clean restart can
+        # reclaim 8765, but never drift into a second, surprising service.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", preferred))
+        except OSError as exc:
+            raise RuntimeError(
+                f"localhost port {preferred} is already in use; stop that process or run the existing Living System"
+            ) from exc
+    return preferred
 
 
 def start(canopy_root: Path, *, preferred_port: int, open_browser: bool) -> str:
-    runtime = running_runtime()
+    runtime = running_runtime(canopy_root)
     if runtime:
+        reconcile_canopy_hooks(canopy_root, mode="installed")
         url = f"http://127.0.0.1:{int(runtime['port'])}"
         if open_browser:
             webbrowser.open(url)
         return url
 
-    if not venv_python().is_file() or not (ROOT / "dist" / "index.html").is_file():
+    needs_install = not venv_python().is_file() or not (ROOT / "dist" / "index.html").is_file()
+    if needs_install:
         install(canopy_root)
+    else:
+        reconcile_canopy_hooks(canopy_root, mode="installed")
 
     port = available_port(preferred_port)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -240,6 +293,7 @@ def start(canopy_root: Path, *, preferred_port: int, open_browser: bool) -> str:
             "127.0.0.1",
             "--port",
             str(port),
+            "--no-access-log",
         ],
         cwd=ROOT,
         env=env,
@@ -251,7 +305,7 @@ def start(canopy_root: Path, *, preferred_port: int, open_browser: bool) -> str:
     for _ in range(80):
         if process.poll() is not None:
             raise RuntimeError(f"Living System exited during startup; inspect {LOG_FILE}")
-        if endpoint_healthy(port):
+        if endpoint_healthy(port, canopy_root):
             break
         time.sleep(0.15)
     else:
@@ -288,11 +342,20 @@ def stop() -> bool:
     if not process_alive(pid):
         RUNTIME_FILE.unlink(missing_ok=True)
         return False
+    try:
+        port = int(runtime.get("port", 0))
+        runtime_root = Path(str(runtime.get("canopy_root", ""))).resolve()
+    except (TypeError, ValueError):
+        raise RuntimeError("Runtime identity is invalid; refusing to signal an unverified process")
+    if not endpoint_healthy(port, runtime_root):
+        raise RuntimeError("Runtime identity does not match the Living System; refusing to signal the recorded PID")
     os.kill(pid, signal.SIGTERM)
     for _ in range(40):
         if not process_alive(pid):
             break
         time.sleep(0.1)
+    if process_alive(pid):
+        raise RuntimeError("Living System did not stop within 4 seconds; runtime record was preserved")
     RUNTIME_FILE.unlink(missing_ok=True)
     return True
 
@@ -312,7 +375,7 @@ def doctor(canopy_root: Path) -> int:
         ("PASS" if shutil.which("npm") else "FAIL", "npm", shutil.which("npm") or "missing"),
         ("PASS" if venv_python().is_file() else "INFO", "Python environment", str(ROOT / ".venv")),
         ("PASS" if (ROOT / "dist" / "index.html").is_file() else "INFO", "Frontend build", str(ROOT / "dist")),
-        ("PASS" if running_runtime() else "INFO", "Local service", str(load_runtime().get("url", "stopped"))),
+        ("PASS" if running_runtime(canopy_root) else "INFO", "Local service", str(load_runtime().get("url", "stopped"))),
     ]
     for status, name, detail in checks:
         print(f"[{status}] {name}: {detail}")
@@ -320,7 +383,7 @@ def doctor(canopy_root: Path) -> int:
 
 
 def sync_projection(canopy_root: Path) -> dict[str, object]:
-    runtime = running_runtime()
+    runtime = running_runtime(canopy_root)
     if runtime:
         port = int(runtime["port"])
         request = urllib.request.Request(
@@ -377,8 +440,9 @@ def update(canopy_root: Path) -> None:
     install(canopy_root)
 
 
-def uninstall() -> None:
+def uninstall(canopy_root: Path) -> None:
     stop()
+    reconcile_canopy_hooks(canopy_root, mode="core")
     for path in (ROOT / ".venv", ROOT / "node_modules", ROOT / "dist", DATA_DIR):
         if path.is_dir():
             shutil.rmtree(path)
@@ -400,7 +464,8 @@ def parse_args() -> argparse.Namespace:
     sync_parser.add_argument("--canopy-root", default="")
     sync_parser.add_argument("--json", action="store_true")
     subparsers.add_parser("stop")
-    subparsers.add_parser("uninstall")
+    uninstall_parser = subparsers.add_parser("uninstall")
+    uninstall_parser.add_argument("--canopy-root", default="")
     subparsers.add_parser("build")
     subparsers.add_parser("visual-test")
     return parser.parse_args()
@@ -434,7 +499,7 @@ def main() -> int:
             update(canopy_root)
             print("Canopy Living System updated")
         elif args.command == "uninstall":
-            uninstall()
+            uninstall(canopy_root)
             print("Canopy Living System generated runtime removed")
         elif args.command == "build":
             build_frontend()

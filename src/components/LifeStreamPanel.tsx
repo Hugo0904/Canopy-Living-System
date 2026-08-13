@@ -12,7 +12,8 @@ import {
   Wrench,
 } from "lucide-react";
 import { activityKind, activityStatus, t, type Locale } from "../i18n";
-import type { ActivityEvent, LifeEventsResponse } from "../types";
+import { buildLifeStories, preferredStepSummary } from "../lifeStories";
+import type { ActivityEvent, LifeEventsResponse, LifeStory, LifeStoryIntervention } from "../types";
 
 type LifeFilter = "all" | "growth" | "protection";
 
@@ -28,16 +29,16 @@ interface LifeStreamPanelProps {
   onOpenTimeline: () => void;
 }
 
-function phaseIcon(event: ActivityEvent) {
-  if (event.phase === "growth" || event.growth_stage) return <Sparkles size={14} />;
-  if (event.phase === "protection" || event.status === "blocked") return <ShieldCheck size={14} />;
-  if (event.kind === "tool") return <Wrench size={14} />;
-  if (event.status === "completed" || event.status === "applied") return <CheckCircle2 size={14} />;
+function phaseIcon(story: LifeStory) {
+  if (story.learning.mode !== "none") return <Sparkles size={14} />;
+  if (story.phase === "protection" || story.status === "blocked") return <ShieldCheck size={14} />;
+  if (story.primary_kind === "tool") return <Wrench size={14} />;
+  if (story.status === "completed" || story.status === "applied") return <CheckCircle2 size={14} />;
   return <Activity size={14} />;
 }
 
-function hasModel(event: ActivityEvent): string {
-  const model = String(event.facts?.model ?? "");
+function hasModel(story: LifeStory): string {
+  const model = String(story.facts?.model ?? "");
   return model && model !== "unreported" ? model : "";
 }
 
@@ -53,128 +54,48 @@ const VISIBLE_FACTS = [
   "missing_obligations",
 ] as const;
 
-const GENERIC_RESULT_SUMMARIES = new Set([
-  "AI 已整理本次協助結果。",
-  "AI 已完成協助。",
-  "AI 已完成協助，Canopy 也完成必要的收尾驗證。",
-  "AI completed this turn.",
-]);
-
-function visibleSummary(value: string | undefined, locale: Locale): string {
-  const summary = String(value ?? "").trim();
-  return GENERIC_RESULT_SUMMARIES.has(summary)
-    ? t(locale, "life.summary_unavailable")
-    : summary;
-}
-
-interface LearningDisposition {
-  mode: "applied" | "reviewed" | "reviewing" | "pending" | "none" | "incomplete";
-  title: string;
-  detail: string;
-  nextBenefit: string;
-  stage: string;
-}
-
-function learningDisposition(event: ActivityEvent, locale: Locale): LearningDisposition | undefined {
-  // A concrete learning is rendered from Core evidence below. Never replace it
-  // with a UI inference or reuse an assistant summary as if it were memory.
-  if (String(event.learning ?? "").trim()) return undefined;
-
-  const resolverStatus = String(event.facts?.resolver_status ?? "");
-  const matchedCards = Number(event.facts?.matched_cards ?? 0) || 0;
-  const matchedExistingMemory = matchedCards > 0 || [
-    "specific_card_matched",
-    "semantic_review_required",
-  ].includes(resolverStatus);
-
-  if (event.kind === "seed_action") {
-    if (event.status === "applied") {
-      return {
-        mode: "applied",
-        title: t(locale, "life.learning.applied"),
-        detail: t(locale, "life.learning.applied_detail"),
-        nextBenefit: event.next_benefit || t(locale, "life.learning.applied_next"),
-        stage: "applied",
-      };
-    }
-    return {
-      mode: "reviewed",
-      title: t(locale, "life.learning.reviewed"),
-      detail: t(locale, "life.learning.reviewed_detail"),
-      nextBenefit: t(locale, "life.learning.reviewed_next"),
-      stage: "reviewed",
-    };
-  }
-
-  if (event.growth_stage === "applied") {
-    return {
-      mode: "applied",
-      title: t(locale, "life.learning.applied"),
-      detail: t(locale, "life.learning.applied_detail"),
-      nextBenefit: event.next_benefit || t(locale, "life.learning.applied_next"),
-      stage: "applied",
-    };
-  }
-
-  if (event.kind === "miss_analysis") {
-    return {
-      mode: "reviewing",
-      title: t(locale, "life.learning.miss_review"),
-      detail: t(locale, "life.learning.miss_review_detail"),
-      nextBenefit: "",
-      stage: "observed",
-    };
-  }
-
-  if (event.kind === "seed_intake") {
-    return {
-      mode: "reviewing",
-      title: t(locale, "life.learning.evidence_unavailable"),
-      detail: t(locale, "life.learning.evidence_unavailable_detail"),
-      nextBenefit: "",
-      stage: event.growth_stage || "observed",
-    };
-  }
-
-  if (event.kind !== "turn") return undefined;
-
-  if (event.status === "in_progress") {
-    return {
-      mode: matchedExistingMemory ? "reviewing" : "pending",
-      title: t(locale, matchedExistingMemory ? "life.learning.reviewing" : "life.learning.pending"),
-      detail: t(locale, matchedExistingMemory ? "life.learning.reviewing_detail" : "life.learning.pending_detail"),
-      nextBenefit: "",
-      stage: "pending",
-    };
-  }
-
-  if (event.phase === "protection" || ["blocked", "interrupted", "attention", "failed"].includes(event.status)) {
-    return {
-      mode: "incomplete",
-      title: t(locale, "life.learning.incomplete"),
-      detail: t(locale, "life.learning.incomplete_detail"),
-      nextBenefit: "",
-      stage: "incomplete",
-    };
-  }
-
-  if (matchedExistingMemory) {
-    return {
-      mode: "reviewing",
-      title: t(locale, "life.learning.matched"),
-      detail: t(locale, "life.learning.matched_detail"),
-      nextBenefit: "",
-      stage: "observed",
-    };
-  }
-
-  return {
-    mode: "none",
-    title: t(locale, "life.learning.none"),
-    detail: t(locale, "life.learning.none_detail"),
-    nextBenefit: "",
-    stage: "none",
+function roleLabel(locale: Locale, role: string): string {
+  const names: Record<Locale, Record<string, string>> = {
+    "zh-TW": { "senior-engineer": "資深工程師", "ui-ux-designer": "UI／UX 設計師", "ai-engineer": "AI 工程師" },
+    "zh-CN": { "senior-engineer": "资深工程师", "ui-ux-designer": "UI／UX 设计师", "ai-engineer": "AI 工程师" },
+    en: { "senior-engineer": "Senior Engineer", "ui-ux-designer": "UI/UX Designer", "ai-engineer": "AI Engineer" },
   };
+  return names[locale][role] ?? role;
+}
+
+function interventionText(intervention: LifeStoryIntervention, locale: Locale): string {
+  if (intervention.kind === "role_selected") {
+    return t(locale, "life.intervention.role", { role: roleLabel(locale, intervention.value) });
+  }
+  if (intervention.kind === "prior_context") return t(locale, "life.intervention.context");
+  if (intervention.kind === "evolution_review") return t(locale, "life.intervention.evolution");
+  if (intervention.kind === "memory_applied") {
+    return intervention.summary
+      ? t(locale, "life.intervention.memory_applied_detail", { summary: intervention.summary })
+      : t(locale, "life.intervention.memory_applied");
+  }
+  return intervention.summary
+    ? t(locale, "life.intervention.memory_reviewed_detail", { summary: intervention.summary })
+    : t(locale, "life.intervention.memory_reviewed");
+}
+
+function learningCopy(story: LifeStory, locale: Locale): { title: string; detail: string; next: string } {
+  const evidence = story.learning;
+  const fallbackDetail = t(locale, `life.learning.story_${evidence.mode}_detail`);
+  return {
+    title: t(locale, `life.learning.story_${evidence.mode}`),
+    detail: evidence.summary || fallbackDetail,
+    next: evidence.next_benefit,
+  };
+}
+
+function omittedEvidenceCount(omitted: Record<string, unknown> | undefined): number {
+  if (!omitted) return 0;
+  const direct = ["malformed", "over_limit", "sensitive"].reduce((total, key) => total + (Number(omitted[key]) || 0), 0);
+  const quotas = omitted.source_quota && typeof omitted.source_quota === "object"
+    ? Object.values(omitted.source_quota as Record<string, unknown>).reduce<number>((total, value) => total + (Number(value) || 0), 0)
+    : 0;
+  return direct + quotas;
 }
 
 export function LifeStreamPanel({
@@ -189,23 +110,20 @@ export function LifeStreamPanel({
   onOpenTimeline,
 }: LifeStreamPanelProps) {
   const [filter, setFilter] = useState<LifeFilter>("all");
-  const [expandedEventId, setExpandedEventId] = useState("");
-  const visibleEvents = useMemo(() => {
-    return events.filter((event) => {
-      if (filter === "growth") return Boolean(event.growth_stage || event.phase === "growth");
-      if (filter === "protection") {
-        return event.phase === "protection" || ["blocked", "failed", "interrupted"].includes(event.status);
-      }
-      return true;
-    });
-  }, [events, filter]);
-  const current = events[0];
+  const [expandedCorrelationId, setExpandedCorrelationId] = useState("");
+  const stories = useMemo(() => buildLifeStories(events), [events]);
+  const visibleStories = useMemo(() => stories.filter((story) => {
+    if (filter === "growth") return story.learning.mode !== "none" || story.evolution_requested;
+    if (filter === "protection") return story.phase === "protection" || ["blocked", "failed", "interrupted"].includes(story.status);
+    return true;
+  }), [stories, filter]);
+  const current = stories[0];
   const currentModel = current ? hasModel(current) : "";
-  const currentSummary = current ? visibleSummary(current.summary, locale) : "";
+  const omittedCount = omittedEvidenceCount(sync.omitted);
 
-  function selectEvent(event: ActivityEvent) {
-    setExpandedEventId((currentId) => currentId === event.id ? "" : event.id);
-    onSelectModule(event.module_id);
+  function selectStory(story: LifeStory) {
+    setExpandedCorrelationId((currentId) => currentId === story.correlation_id ? "" : story.correlation_id);
+    onSelectModule(story.module_id);
   }
 
   if (!open) {
@@ -213,8 +131,8 @@ export function LifeStreamPanel({
       <button className="life-stream-peek" onClick={onToggle} aria-label={t(locale, "life.open")}>
         <span className="life-pulse" data-status={sync.status} />
         <HeartPulse size={17} />
-        <span><strong>{t(locale, "life.title")}</strong><small>{currentSummary || t(locale, "life.no_events")}</small></span>
-        <em>{stats.total}</em>
+        <span><strong>{t(locale, "life.title")}</strong><small>{current?.summary || t(locale, "life.no_events")}</small></span>
+        <em>{stories.length}</em>
         <ChevronDown className="life-fold-direction" size={15} />
       </button>
     );
@@ -232,7 +150,7 @@ export function LifeStreamPanel({
 
       <section className="life-current" data-status={current?.status ?? "starting"}>
         <div className="life-current-label"><span className="life-pulse" data-status={current?.status ?? sync.status} />{t(locale, "life.current")}</div>
-        <strong>{currentSummary || t(locale, "life.waiting")}</strong>
+        <strong>{current?.summary || t(locale, "life.waiting")}</strong>
         <div>
           {current && <span>{activityStatus(locale, current.status)}</span>}
           {currentModel && <code>{currentModel}</code>}
@@ -249,70 +167,86 @@ export function LifeStreamPanel({
       </div>
 
       <div className="life-event-stream" aria-live="polite">
-        {visibleEvents.length ? visibleEvents.slice(0, 36).map((event) => {
-          const expanded = expandedEventId === event.id;
-          const relatedEvents = event.correlation_id
-            ? events.filter((candidate) => candidate.correlation_id === event.correlation_id && candidate.id !== event.id).slice(0, 8)
-            : [];
+        {visibleStories.length ? visibleStories.slice(0, 24).map((story) => {
+          const expanded = expandedCorrelationId === story.correlation_id;
           const facts = VISIBLE_FACTS
-            .map((key) => [key, event.facts?.[key]] as const)
-            .filter(([, value]) => value && value !== "unreported" && value !== "0" && value !== "false");
-          const summary = visibleSummary(event.summary, locale);
-          const assistance = visibleSummary(event.assistance, locale);
-          const learningState = learningDisposition(event, locale);
+            .map((key) => [key, story.facts?.[key]] as const)
+            .filter(([, value]) => value && value !== "unreported" && value !== "false");
+          const learning = learningCopy(story, locale);
           return (
-          <article key={event.id} className="life-event" data-kind={event.kind} data-phase={event.phase} data-status={event.status} data-expanded={expanded ? "true" : "false"}>
-            <button className="life-event-main" onClick={() => selectEvent(event)} aria-expanded={expanded}>
-              <span className="life-event-icon">{phaseIcon(event)}</span>
-              <span className="life-event-copy">
-                <span><time>{new Date(event.occurred_at).toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time><em>{t(locale, `life.phase.${event.phase}`)}</em></span>
-                <strong>{activityKind(locale, event.kind)}</strong>
-                <small>{summary}</small>
-              </span>
-              <span className="life-event-status">{activityStatus(locale, event.status)}<ChevronRight size={12} /></span>
-            </button>
-            {expanded && (
-              <section className="life-event-details" aria-label={t(locale, "life.details")}>
-                <header><strong>{t(locale, "life.details")}</strong><small>{t(locale, "life.focus_note")}</small></header>
-                {assistance && <div><span>{t(locale, "life.helped")}</span><p>{assistance}</p></div>}
-                {event.request_effect && <div><span>{t(locale, "life.request_effect")}</span><p>{event.request_effect}</p></div>}
-                {event.verification && <div><span>{t(locale, "life.verified")}</span><p>{event.verification}</p></div>}
-                {learningState && (
-                  <div className="life-learning-status" data-mode={learningState.mode}>
+            <article key={story.id} className="life-event" data-kind="turn_story" data-phase={story.phase} data-status={story.status} data-expanded={expanded ? "true" : "false"}>
+              <button className="life-event-main" onClick={() => selectStory(story)} aria-expanded={expanded}>
+                <span className="life-event-icon">{phaseIcon(story)}</span>
+                <span className="life-event-copy">
+                  <span><time>{new Date(story.occurred_at).toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</time><em>{t(locale, `life.phase.${story.phase}`)}</em></span>
+                  <strong>{t(locale, "life.turn_story")}</strong>
+                  <small>{story.summary || t(locale, "life.outcome_unavailable")}</small>
+                </span>
+                <span className="life-event-status">{activityStatus(locale, story.status)}<ChevronRight size={12} /></span>
+              </button>
+              {expanded && (
+                <section className="life-event-details" aria-label={t(locale, "life.details")}>
+                  <header><strong>{t(locale, "life.details")}</strong><small>{t(locale, "life.focus_note")}</small></header>
+
+                  <div className="life-story-section" data-section="outcome">
+                    <span>{t(locale, "life.ai_outcome")}</span>
+                    <p>{story.outcome || t(locale, "life.outcome_unavailable")}</p>
+                    {story.outcome && <small>{t(locale, "life.outcome_evidence_note")}</small>}
+                  </div>
+
+                  <div className="life-story-section" data-section="intervention">
+                    <span>{t(locale, "life.canopy_intervention")}</span>
+                    {story.interventions.length ? (
+                      <ul>{story.interventions.map((intervention, index) => <li key={`${intervention.kind}:${index}`}>{interventionText(intervention, locale)}</li>)}</ul>
+                    ) : <p>{t(locale, "life.intervention.baseline_only")}</p>}
+                  </div>
+
+                  <div className="life-story-section" data-section="verification">
+                    <span>{t(locale, "life.verified")}</span>
+                    {story.verifications.length ? (
+                      <ul>{story.verifications.map((verification, index) => (
+                        <li key={`${verification.kind}:${index}`}><strong>{activityKind(locale, verification.kind)}</strong>{verification.text}</li>
+                      ))}</ul>
+                    ) : <p>{t(locale, "life.verification_unavailable")}</p>}
+                    <small>{t(locale, "life.verification_scope_note")}</small>
+                  </div>
+
+                  <div className="life-learning-status" data-mode={story.learning.mode}>
                     <span><Sparkles size={12} />{t(locale, "life.learning_status")}</span>
-                    <strong>{learningState.title}</strong>
-                    <p>{learningState.detail}</p>
-                    {learningState.nextBenefit && <small><strong>{t(locale, "life.next_time")}</strong>{learningState.nextBenefit}</small>}
-                    <em>{t(locale, `life.stage.${learningState.stage}`)}</em>
+                    <strong>{learning.title}</strong>
+                    <p>{learning.detail}</p>
+                    {learning.next && <small><strong>{t(locale, "life.next_time")}</strong>{learning.next}</small>}
+                    <em>{t(locale, `life.stage.${story.learning.stage}`)}</em>
                   </div>
-                )}
-                {facts.length > 0 && <dl>{facts.map(([key, value]) => <div key={key}><dt>{t(locale, `life.fact.${key}`)}</dt><dd>{value}</dd></div>)}</dl>}
-                {relatedEvents.length > 0 && (
-                  <div className="life-turn-steps">
-                    <span>{t(locale, "life.turn_steps", { count: relatedEvents.length + 1 })}</span>
-                    <ol>{[event, ...relatedEvents].sort((left, right) => left.occurred_at.localeCompare(right.occurred_at)).map((step) => (
-                      <li key={step.id}><i data-status={step.status} /><span><strong>{activityKind(locale, step.kind)}</strong><small>{visibleSummary(step.assistance || step.summary, locale)}</small></span></li>
-                    ))}</ol>
-                  </div>
-                )}
-              </section>
-            )}
-            {event.learning && (
-              <div className="life-learning">
-                <span><Sparkles size={13} />{t(locale, "life.learned")}</span>
-                <p>{event.learning}</p>
-                {event.next_benefit && <small><strong>{t(locale, "life.next_time")}</strong>{event.next_benefit}</small>}
-                <em data-stage={event.growth_stage}>{t(locale, `life.stage.${event.growth_stage || "observed"}`)}</em>
-              </div>
-            )}
-          </article>
+
+                  {story.evolution_requested && (
+                    <div className="life-evolution-status">
+                      <span>{t(locale, "life.evolution_status")}</span>
+                      <strong>{t(locale, "life.evolution_requested")}</strong>
+                      <p>{t(locale, "life.evolution_requested_detail")}</p>
+                    </div>
+                  )}
+
+                  {facts.length > 0 && <dl>{facts.map(([key, value]) => <div key={key}><dt>{t(locale, `life.fact.${key}`)}</dt><dd>{value}</dd></div>)}</dl>}
+                  {story.steps.length > 1 && (
+                    <div className="life-turn-steps">
+                      <span>{t(locale, "life.turn_steps", { count: story.steps.length })}</span>
+                      <ol>{story.steps.map((step) => (
+                        <li key={step.id}><i data-status={step.status} /><span><strong>{activityKind(locale, step.kind)}</strong><small>{preferredStepSummary(step)}</small></span></li>
+                      ))}</ol>
+                    </div>
+                  )}
+                </section>
+              )}
+            </article>
           );
         }) : <div className="life-empty"><RefreshCw size={18} /><p>{t(locale, filter === "all" ? "life.no_events" : "life.no_filtered_events")}</p></div>}
       </div>
 
       <footer className="life-stream-footer">
         <button onClick={onOpenTimeline}>{t(locale, "life.open_calendar")}<ChevronRight size={13} /></button>
-        <span>{t(locale, "life.retention", { count: retentionDays, total: stats.total })}</span>
+        <span>{t(locale, "life.retention", { count: retentionDays, total: stats.total, stories: stories.length })}</span>
+        {(sync.truncated || omittedCount > 0) && <span className="life-coverage-note">{t(locale, "life.coverage_limited", { count: omittedCount })}</span>}
         <small>{t(locale, "life.privacy")}</small>
       </footer>
     </aside>

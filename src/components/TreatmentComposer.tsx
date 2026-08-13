@@ -55,7 +55,7 @@ export function TreatmentComposer({ target, locale, intents, initialIntent, onCl
         <header>
           <div>
             <span className="eyebrow">{t(locale, "treatment.eyebrow")}</span>
-            <h2 id="treatment-title">{t(locale, target.type === "module" ? "treatment.module_title" : target.id === "new-seed-card" ? "treatment.create_title" : "treatment.title")}</h2>
+            <h2 id="treatment-title">{t(locale, target.id === "new-seed-card" ? "treatment.create_title" : "treatment.title")}</h2>
           </div>
           <button className="icon-button" onClick={onClose} aria-label={t(locale, "treatment.close")}><X size={19} /></button>
         </header>
@@ -77,7 +77,7 @@ export function TreatmentComposer({ target, locale, intents, initialIntent, onCl
               id="treatment-prompt"
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
-              placeholder={t(locale, target.type === "module" ? "treatment.module_placeholder" : target.id === "new-seed-card" ? "treatment.create_placeholder" : "treatment.placeholder")}
+              placeholder={t(locale, target.id === "new-seed-card" ? "treatment.create_placeholder" : "treatment.placeholder")}
               rows={6}
             />
             <div className="guard-note"><Bot size={17} /><span>{t(locale, "treatment.guard")}</span></div>

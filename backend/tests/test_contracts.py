@@ -1,33 +1,60 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from unittest.mock import call, patch
+from unittest.mock import AsyncMock, call, patch
 
 from backend.app import main as backend_main
-from backend.app.canopy_adapter import CanopyAdapter, normalized_status, worst_status
+from backend.app.canopy_adapter import CanopyAdapter, CanopySnapshotUnavailable
 from backend.app.database import ObservatoryDatabase
 from backend.app.proposals import build_treatment_proposal
+from backend.app.snapshot_contract import SnapshotContractError, validate_normalized_snapshot
 from backend.app.topology import TopologyContractError, validate_snapshot_topology
 
 
-class StatusContractTest(unittest.TestCase):
-    def test_statuses_are_normalized_without_hiding_failure(self) -> None:
-        self.assertEqual(normalized_status("PASS"), "healthy")
-        self.assertEqual(normalized_status("degraded"), "attention")
-        self.assertEqual(normalized_status("FAIL"), "critical")
-        self.assertEqual(worst_status(["healthy", "critical", "attention"]), "critical")
-
-    def test_missing_canopy_is_explicitly_disconnected(self) -> None:
+class PublicSnapshotAdapterTest(unittest.TestCase):
+    def test_missing_canopy_is_explicitly_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            snapshot = CanopyAdapter(Path(temp_dir)).collect()
-        self.assertEqual(snapshot["source_mode"], "disconnected")
-        self.assertEqual(snapshot["overall"]["status"], "critical")
-        self.assertEqual(snapshot["seed_memory"]["cards"], [])
+            with self.assertRaisesRegex(CanopySnapshotUnavailable, "public snapshot command"):
+                CanopyAdapter(Path(temp_dir)).collect()
+
+    def test_public_snapshot_is_passed_through_without_private_seed_parsing(self) -> None:
+        payload = normalized_snapshot()
+        payload["modules"][0]["id"] = "roles"
+        payload["modules"][0]["metrics"] = {"recent_selections": 33}
+        payload["modules"][1]["metrics"] = {
+            "observed_preflights": 314,
+            "average_context_chars": 2156.3,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "canopy").touch()
+            adapter = CanopyAdapter(root)
+            with patch.object(adapter, "_run_json", return_value=(payload, "")) as run_json:
+                snapshot = adapter.collect()
+
+        self.assertIs(snapshot, payload)
+        self.assertEqual(snapshot["modules"][0]["metrics"]["recent_selections"], 33)
+        self.assertEqual(snapshot["modules"][1]["metrics"]["average_context_chars"], 2156.3)
+        run_json.assert_called_once_with(["observe", "snapshot", "--json"], timeout=120)
+        self.assertFalse(hasattr(adapter, "_seed_health"))
+        self.assertFalse(hasattr(adapter, "_read_cards"))
+
+    def test_public_snapshot_failure_does_not_fall_back_to_parallel_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "canopy").touch()
+            adapter = CanopyAdapter(root)
+            with patch.object(adapter, "_run_json", return_value=({}, "required topology path is missing")) as run_json:
+                with self.assertRaisesRegex(CanopySnapshotUnavailable, "required topology path"):
+                    adapter.collect()
+
+        run_json.assert_called_once_with(["observe", "snapshot", "--json"], timeout=120)
 
 
 class EvolutionLabContractTest(unittest.TestCase):
@@ -313,10 +340,44 @@ class EvolutionLabApiTest(unittest.IsolatedAsyncioTestCase):
         collect.assert_called_once_with()
 
 
+class LocalApiBoundaryTest(unittest.TestCase):
+    def test_api_origin_guard_allows_only_local_browser_origins(self) -> None:
+        self.assertTrue(backend_main._local_origin_allowed(""))
+        self.assertTrue(backend_main._local_origin_allowed("http://127.0.0.1:8765"))
+        self.assertTrue(backend_main._local_origin_allowed("http://localhost:8765"))
+        self.assertFalse(backend_main._local_origin_allowed("https://example.com"))
+        self.assertFalse(backend_main._local_origin_allowed("null"))
+
+
 def topology_snapshot(*, extra_module: bool = False) -> dict:
     modules = [
-        {"id": "brain", "health": {"status": "healthy"}},
-        {"id": "hooks", "health": {"status": "healthy"}},
+        {
+            "id": "brain",
+            "name": "Brain",
+            "zone": "core",
+            "summary": "Brain module",
+            "health": {"status": "healthy"},
+            "activity": {"status": "observed", "label": "observed"},
+            "impact": {"status": "observed", "label": "observed"},
+            "confidence": {"level": "high", "label": "high"},
+            "metrics": {},
+            "issue_ids": [],
+        },
+        {
+            "id": "hooks",
+            "name": "Hooks",
+            "zone": "boundary",
+            "summary": "Hook module",
+            "health": {"status": "healthy"},
+            "activity": {"status": "observed", "label": "observed"},
+            "impact": {"status": "observed", "label": "observed"},
+            "confidence": {"level": "high", "label": "high"},
+            "metrics": {
+                "observed_preflights": None,
+                "average_context_chars": None,
+            },
+            "issue_ids": [],
+        },
     ]
     nodes = [
         {"id": "root", "parent_id": "", "kind": "canopy", "module_id": "", "dependencies": []},
@@ -337,7 +398,20 @@ def topology_snapshot(*, extra_module: bool = False) -> dict:
         }
     ]
     if extra_module:
-        modules.append({"id": "new-capability", "health": {"status": "healthy"}})
+        modules.append(
+            {
+                "id": "new-capability",
+                "name": "New capability",
+                "zone": "extension",
+                "summary": "New module",
+                "health": {"status": "healthy"},
+                "activity": {"status": "observed", "label": "observed"},
+                "impact": {"status": "observed", "label": "observed"},
+                "confidence": {"level": "high", "label": "high"},
+                "metrics": {},
+                "issue_ids": [],
+            }
+        )
         nodes.append(
             {"id": "module:new-capability", "parent_id": "root", "kind": "organ", "module_id": "new-capability", "dependencies": []}
         )
@@ -352,7 +426,10 @@ def topology_snapshot(*, extra_module: bool = False) -> dict:
             }
         )
     return {
+        "schema_version": 4,
+        "generated_at": "2026-08-13T00:00:00+00:00",
         "source_mode": "canopy_public_contract",
+        "overall": {"status": "healthy", "scores": {}, "summary": "verified"},
         "modules": modules,
         "topology": {
             "schema_version": 2,
@@ -362,7 +439,193 @@ def topology_snapshot(*, extra_module: bool = False) -> dict:
         },
         "connections": connections,
         "structure": {"root_id": "root", "nodes": nodes, "edges": edges},
+        "seed_memory": {"cards": [], "active_count": 0, "candidate_count": 0, "archived_count": 0},
+        "roles": [],
+        "resources": {},
+        "issues": [],
+        "capabilities": {"card_proposals": True, "direct_card_mutation": False},
     }
+
+
+def normalized_snapshot() -> dict:
+    return topology_snapshot()
+
+
+def link_issue(snapshot: dict, issue: dict, *, module_id: str = "brain") -> None:
+    issue["module_ids"] = [module_id]
+    remediation = issue.setdefault("remediation", {})
+    remediation.setdefault("requestable", False)
+    snapshot["issues"].append(issue)
+    module = next(item for item in snapshot["modules"] if item["id"] == module_id)
+    module["issue_ids"].append(issue["id"])
+
+
+class NormalizedSnapshotContractTest(unittest.TestCase):
+    def test_module_issue_links_are_core_owned_and_bidirectionally_consistent(self) -> None:
+        snapshot = normalized_snapshot()
+        link_issue(snapshot, {
+            "id": "miss:routing.example",
+            "severity": "attention",
+            "code": "seed_routing_miss",
+            "title": "Routing miss",
+            "detail": "A continuation left the required workflow.",
+            "remediation": {"requestable": True},
+        })
+
+        validate_normalized_snapshot(snapshot)
+
+        self.assertEqual(snapshot["modules"][0]["issue_ids"], ["miss:routing.example"])
+        self.assertEqual(snapshot["issues"][0]["module_ids"], ["brain"])
+
+    def test_module_issue_links_cannot_reference_unknown_or_one_sided_records(self) -> None:
+        unknown = normalized_snapshot()
+        link_issue(unknown, {
+            "id": "miss:routing.example",
+            "severity": "attention",
+            "title": "Routing miss",
+            "detail": "detail",
+            "remediation": {"requestable": True},
+        })
+        unknown["issues"][0]["module_ids"] = ["not-a-module"]
+        with self.assertRaisesRegex(SnapshotContractError, "unknown module"):
+            validate_normalized_snapshot(unknown)
+
+        one_sided = normalized_snapshot()
+        link_issue(one_sided, {
+            "id": "miss:routing.example",
+            "severity": "attention",
+            "title": "Routing miss",
+            "detail": "detail",
+            "remediation": {"requestable": True},
+        })
+        one_sided["modules"][0]["issue_ids"] = []
+        with self.assertRaisesRegex(SnapshotContractError, "do not match"):
+            validate_normalized_snapshot(one_sided)
+
+    def test_nonzero_role_and_context_metrics_survive_the_normalized_contract(self) -> None:
+        snapshot = normalized_snapshot()
+        snapshot["modules"][1]["metrics"] = {
+            "observed_preflights": 314,
+            "average_context_chars": 2156.3,
+        }
+        snapshot["modules"].append(
+            {
+                "id": "roles",
+                "name": "Roles",
+                "zone": "capabilities",
+                "summary": "Role module",
+                "health": {"status": "healthy"},
+                "activity": {"status": "observed", "label": "observed"},
+                "impact": {"status": "observed", "label": "observed"},
+                "confidence": {"level": "high", "label": "high"},
+                "metrics": {"recent_selections": 33},
+                "issue_ids": [],
+            }
+        )
+
+        report = validate_normalized_snapshot(snapshot)
+
+        self.assertEqual(report["status"], "valid")
+        self.assertEqual(snapshot["modules"][2]["metrics"]["recent_selections"], 33)
+        self.assertEqual(snapshot["modules"][1]["metrics"]["average_context_chars"], 2156.3)
+
+    def test_null_metric_is_no_data_while_an_explicit_zero_stays_zero(self) -> None:
+        snapshot = normalized_snapshot()
+        snapshot["modules"][1]["metrics"] = {
+            "observed_preflights": 0,
+            "average_context_chars": None,
+        }
+
+        validate_normalized_snapshot(snapshot)
+
+        self.assertEqual(snapshot["modules"][1]["metrics"]["observed_preflights"], 0)
+        self.assertIsNone(snapshot["modules"][1]["metrics"]["average_context_chars"])
+
+    def test_missing_required_observation_metric_is_a_contract_failure(self) -> None:
+        snapshot = normalized_snapshot()
+        snapshot["modules"][1]["metrics"].pop("average_context_chars")
+
+        with self.assertRaisesRegex(SnapshotContractError, "missing required metric"):
+            validate_normalized_snapshot(snapshot)
+
+    def test_legacy_or_parallel_snapshot_is_rejected(self) -> None:
+        snapshot = normalized_snapshot()
+        snapshot["schema_version"] = 1
+        snapshot["source_mode"] = "compatibility_adapter"
+
+        with self.assertRaises(SnapshotContractError):
+            validate_normalized_snapshot(snapshot)
+
+    def test_core_issue_lifecycle_is_preserved_without_local_recalculation(self) -> None:
+        snapshot = normalized_snapshot()
+        link_issue(snapshot, {
+                "id": "doctor:codex-hooks",
+                "source": "canopy_doctor",
+                "state": "awaiting_runtime_verification",
+                "owner": "canopy_core",
+                "severity": "attention",
+                "code": "doctor_check_failed",
+                "title": "Codex hooks need runtime verification",
+                "detail": "Configuration passed; live tool evidence is still pending.",
+                "requires_operator": False,
+                "remediation": {
+                    "mode": "auto_safe",
+                    "state": "awaiting_runtime_verification",
+                    "action_id": "repair_codex_hooks",
+                    "automatic": True,
+                    "requestable": True,
+                    "verification": "canopy doctor --json",
+                },
+            }, module_id="hooks")
+
+        validate_normalized_snapshot(snapshot)
+
+        self.assertEqual(snapshot["issues"][0]["owner"], "canopy_core")
+        self.assertEqual(
+            snapshot["issues"][0]["remediation"]["state"],
+            "awaiting_runtime_verification",
+        )
+
+    def test_invalid_issue_remediation_cannot_enter_the_projection(self) -> None:
+        snapshot = normalized_snapshot()
+        link_issue(snapshot, {
+                "id": "invalid:remediation",
+                "severity": "attention",
+                "title": "invalid",
+                "detail": "invalid",
+                "remediation": {"automatic": "yes", "requestable": False},
+            })
+
+        with self.assertRaisesRegex(SnapshotContractError, "automatic must be boolean"):
+            validate_normalized_snapshot(snapshot)
+
+    def test_seed_operator_issue_keeps_core_owner_and_review_action(self) -> None:
+        snapshot = normalized_snapshot()
+        link_issue(snapshot, {
+                "id": "LEARN-001",
+                "state": "needs_operator",
+                "owner": "seed_core",
+                "severity": "attention",
+                "code": "seed_operator_issue",
+                "title": "A Seed learning item needs semantic review",
+                "detail": "Compare the candidate with its source evidence.",
+                "remediation": {
+                    "mode": "operator_required",
+                    "state": "needs_operator",
+                    "action_id": "review_seed_operator_issue",
+                    "automatic": False,
+                    "requestable": True,
+                    "next_action": "Review the source evidence before changing a card.",
+                    "verification": "Re-run Seed health and reconcile the same finding.",
+                },
+            })
+
+        validate_normalized_snapshot(snapshot)
+
+        issue = snapshot["issues"][0]
+        self.assertEqual(issue["owner"], "seed_core")
+        self.assertFalse(issue["remediation"]["automatic"])
+        self.assertEqual(issue["remediation"]["state"], "needs_operator")
 
 
 class TopologyProjectionContractTest(unittest.TestCase):
@@ -403,34 +666,90 @@ class TopologyProjectionContractTest(unittest.TestCase):
 
 
 class TopologySyncRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_projection_refreshes_automatically_after_short_startup_delay(self) -> None:
+        sync = AsyncMock(side_effect=asyncio.CancelledError())
+        sleep = AsyncMock()
+        with (
+            patch.object(backend_main, "_latest_verified_snapshot", return_value=normalized_snapshot()),
+            patch.object(backend_main, "sync_snapshot", sync),
+            patch.object(backend_main.asyncio, "sleep", sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await backend_main.snapshot_sync_loop()
+
+        sync.assert_awaited_once_with()
+        sleep.assert_awaited_once_with(backend_main.STARTUP_SNAPSHOT_DELAY_SECONDS)
+
+    async def test_background_snapshot_sync_retries_after_a_degraded_attempt(self) -> None:
+        sync = AsyncMock(side_effect=[RuntimeError("temporary failure"), asyncio.CancelledError()])
+        sleep = AsyncMock()
+        with (
+            patch.object(backend_main, "_latest_verified_snapshot", return_value=None),
+            patch.object(backend_main, "sync_snapshot", sync),
+            patch.object(backend_main.asyncio, "sleep", sleep),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await backend_main.snapshot_sync_loop()
+
+        self.assertEqual(sync.await_count, 2)
+        sleep.assert_awaited_once_with(backend_main.settings.snapshot_sync_seconds)
+
     async def test_invalid_topology_never_reaches_snapshot_storage(self) -> None:
         invalid = topology_snapshot()
         invalid["connections"][0]["target"] = "missing-module"
 
         with (
             patch.object(backend_main.adapter, "collect", return_value=invalid),
-            patch.object(backend_main.database, "latest_snapshot") as latest,
+            patch.object(backend_main.database, "latest_snapshot", return_value=None),
             patch.object(backend_main.database, "save_snapshot") as save,
         ):
             with self.assertRaisesRegex(TopologyContractError, "unknown module"):
                 await backend_main.sync_snapshot()
 
-        latest.assert_not_called()
         save.assert_not_called()
+        self.assertEqual(backend_main.snapshot_sync_state["observation_state"], "contract_invalid")
+        self.assertEqual(backend_main.snapshot_sync_state["projection_state"], "unavailable")
 
     async def test_unavailable_topology_keeps_the_last_verified_projection(self) -> None:
         verified = topology_snapshot()
-        unavailable = {"source_mode": "compatibility_adapter", "modules": verified["modules"]}
+        unavailable = normalized_snapshot()
+        unavailable.pop("topology")
+        unavailable.pop("connections")
+        unavailable.pop("structure")
 
         with (
             patch.object(backend_main.adapter, "collect", return_value=unavailable),
             patch.object(backend_main.database, "latest_snapshot", return_value=verified),
             patch.object(backend_main.database, "save_snapshot") as save,
         ):
-            with self.assertRaisesRegex(TopologyContractError, "retained the last verified"):
-                await backend_main.sync_snapshot()
+            result = await backend_main.snapshot_projection(refresh=True)
 
         save.assert_not_called()
+        self.assertIs(result["snapshot"], verified)
+        self.assertEqual(result["sync"]["observation_state"], "contract_invalid")
+        self.assertEqual(result["sync"]["projection_state"], "last_known_good")
+        self.assertTrue(result["sync"]["using_last_verified"])
+
+    async def test_optional_topology_warning_is_saved_without_becoming_contract_failure(self) -> None:
+        snapshot = normalized_snapshot()
+        link_issue(snapshot, {
+                "id": "optional:path-unavailable",
+                "severity": "attention",
+                "code": "optional_observation_path_unavailable",
+                "title": "Optional observation unavailable",
+                "detail": "A declared optional source is not installed.",
+            }, module_id="hooks")
+
+        with (
+            patch.object(backend_main.adapter, "collect", return_value=snapshot),
+            patch.object(backend_main.database, "save_snapshot", return_value=True) as save,
+        ):
+            result = await backend_main.sync_snapshot()
+
+        self.assertIs(result, snapshot)
+        save.assert_called_once_with(snapshot)
+        self.assertEqual(backend_main.snapshot_sync_state["observation_state"], "observed")
+        self.assertEqual(backend_main.snapshot_sync_state["projection_state"], "current")
 
 
 class ProposalBoundaryTest(unittest.TestCase):
@@ -484,15 +803,15 @@ class ProposalBoundaryTest(unittest.TestCase):
         self.assertIsNone(proposal["before"])
         self.assertFalse(proposal["direct_mutation_allowed"])
 
-    def test_module_improvement_routes_to_canopy_core(self) -> None:
-        _, proposal = build_treatment_proposal(
-            snapshot=self.snapshot,
-            target_type="module",
-            target_id="brain",
-            intent="diagnose",
-            operator_prompt="請確認這個生命單元最近的問題與改善方向",
-        )
-        self.assertEqual(proposal["owner_route"], "canopy_core")
+    def test_module_treatment_cannot_create_parallel_local_request(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Core-issued remediation finding"):
+            build_treatment_proposal(
+                snapshot=self.snapshot,
+                target_type="module",
+                target_id="brain",
+                intent="diagnose",
+                operator_prompt="請確認這個生命單元最近的問題與改善方向",
+            )
 
 
 class DatabaseTest(unittest.TestCase):
@@ -557,6 +876,40 @@ class DatabaseTest(unittest.TestCase):
             self.assertEqual(len(database.snapshot_history()), 1)
             self.assertIsNone(database.get_treatment("TR-OLD"))
 
+    def test_only_latest_snapshot_keeps_the_full_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = ObservatoryDatabase(Path(temp_dir) / "observatory.db")
+            database.initialize()
+            first = {
+                "schema_version": 3,
+                "generated_at": "2026-08-12T00:00:00+00:00",
+                "source_mode": "canopy_public_contract",
+                "overall": {"status": "healthy", "scores": {"structural": 91}},
+                "structure": {"nodes": [{"id": "large-rebuildable-topology"}] * 50},
+                "activity": {"events": [{"id": "large-rebuildable-activity"}] * 50},
+            }
+            second = {
+                **first,
+                "generated_at": "2026-08-12T00:05:00+00:00",
+                "overall": {"status": "attention", "scores": {"structural": 88}},
+            }
+
+            database.save_snapshot(first)
+            database.save_snapshot(second)
+
+            with database.connect() as connection:
+                rows = connection.execute(
+                    "SELECT payload_json FROM snapshots ORDER BY id"
+                ).fetchall()
+            historical = json.loads(rows[0]["payload_json"])
+            latest = json.loads(rows[1]["payload_json"])
+            self.assertTrue(historical["history_summary"])
+            self.assertNotIn("structure", historical)
+            self.assertNotIn("activity", historical)
+            self.assertEqual(historical["overall"]["scores"]["structural"], 91)
+            self.assertIn("structure", latest)
+            self.assertEqual(database.latest_snapshot(), second)
+
     def test_life_events_import_automatically_and_upsert_by_event_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database = ObservatoryDatabase(
@@ -588,16 +941,21 @@ class DatabaseTest(unittest.TestCase):
             }
 
             first = database.import_life_events({"events": [running]})
+            unchanged = database.import_life_events({"events": [running]})
             second = database.import_life_events({"events": [completed]})
             events = database.list_life_events()
 
             self.assertEqual(first["persisted"], 1)
+            self.assertEqual(first["changed"], 1)
+            self.assertEqual(unchanged["changed"], 0)
             self.assertEqual(second["persisted"], 1)
+            self.assertEqual(second["changed"], 1)
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["status"], "completed")
             self.assertEqual(events[0]["facts"]["model"], "gpt-test")
             self.assertEqual(events[0]["verification"], "工具已回報完成。")
             self.assertEqual(database.life_event_stats()["total"], 1)
+            self.assertTrue(database.life_event_stats()["revision"])
             self.assertEqual(database.life_event_cursor(), now)
 
     def test_life_event_v3_rebuild_removes_older_vague_projection(self) -> None:

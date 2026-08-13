@@ -1,6 +1,7 @@
 import { Html, OrbitControls, Sparkles } from "@react-three/drei";
 import { Canvas, events as createPointerEvents, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject, type SyntheticEvent } from "react";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { cardDisplayName, moduleName, structureDisplayName, t, type Locale } from "../i18n";
@@ -21,6 +22,15 @@ const INTERACTION_PRIORITY = {
 } as const;
 
 const MAX_CLICK_TRAVEL_PX = 4;
+const LABORATORY_OFFSET = 3.15;
+const MAX_CAMERA_PAN_RADIUS = 14;
+
+type CameraPanDirection = -1 | 1;
+
+interface CameraPanCommand {
+  direction: CameraPanDirection;
+  revision: number;
+}
 
 export interface VisualEffects {
   master: boolean;
@@ -57,6 +67,20 @@ function selectFromPointer(event: ThreeEvent<MouseEvent>, onSelect: () => void) 
   if (event.delta <= MAX_CLICK_TRAVEL_PX) onSelect();
 }
 
+// Drei's <Html> overlays live inside the same event container as the WebGL
+// canvas. Without stopping the DOM event here, one click can select the label
+// and then continue into the raycaster, where the shell behind that label may
+// overwrite the foreground selection. Keep every projected label on the same
+// interaction path as its visible 3D object.
+function stopProjectedLabelEvent(event: SyntheticEvent) {
+  event.stopPropagation();
+}
+
+function selectFromProjectedLabel(event: SyntheticEvent, onSelect: () => void) {
+  event.stopPropagation();
+  onSelect();
+}
+
 interface SceneProps {
   modules: ModuleHealth[];
   connections: CanopyConnection[];
@@ -65,7 +89,7 @@ interface SceneProps {
   locale: Locale;
   backgroundMode: "detailed" | "simple" | "none";
   visualEffects: VisualEffects;
-  view: "overview" | "seed" | "structure";
+  view: "overview" | "seed" | "structure" | "laboratory";
   selectedModuleId: string;
   selectedCardId: string;
   selectedStructureId: string;
@@ -75,6 +99,7 @@ interface SceneProps {
   onSelectModule: (moduleId: string) => void;
   onSelectCard: (cardId: string) => void;
   onSelectStructure: (nodeId: string) => void;
+  onSelectLaboratory: () => void;
   onSceneInteraction: () => void;
   onEffectDistanceChange: (distance: EffectDistance) => void;
 }
@@ -92,10 +117,10 @@ function useReducedMotion(): boolean {
 }
 
 // Slow ambient movement does not need display-refresh-rate rendering. Keeping
-// it near 12 fps avoids repainting the entire detailed world for every mote.
+// it near 10 fps avoids repainting the entire detailed world for every mote.
 // OrbitControls and focus transitions still invalidate independently while the
 // user is moving the camera, so interaction remains responsive.
-const IDLE_FRAME_INTERVAL_MS = 1000 / 12;
+const IDLE_FRAME_INTERVAL_MS = 1000 / 10;
 
 function SceneRenderBudget({ shadowRevision, active }: { shadowRevision: string; active: boolean }) {
   const gl = useThree((state) => state.gl);
@@ -106,26 +131,27 @@ function SceneRenderBudget({ shadowRevision, active }: { shadowRevision: string;
       invalidate();
       return undefined;
     }
-    let animationFrame = 0;
-    let lastIdleFrame = 0;
-    const requestIdleFrame = (timestamp: number) => {
-      if (!document.hidden && timestamp - lastIdleFrame >= IDLE_FRAME_INTERVAL_MS - 1) {
-        lastIdleFrame = timestamp;
-        invalidate();
-      }
-      animationFrame = window.requestAnimationFrame(requestIdleFrame);
+    let interval: number | undefined;
+    const stop = () => {
+      if (interval === undefined) return;
+      window.clearInterval(interval);
+      interval = undefined;
     };
-    const resume = () => {
-      if (!document.hidden) {
-        lastIdleFrame = 0;
-        invalidate();
-      }
+    const start = () => {
+      stop();
+      if (document.hidden) return;
+      invalidate();
+      interval = window.setInterval(invalidate, IDLE_FRAME_INTERVAL_MS);
     };
-    animationFrame = window.requestAnimationFrame(requestIdleFrame);
-    document.addEventListener("visibilitychange", resume);
+    const syncVisibility = () => {
+      if (document.hidden) stop();
+      else start();
+    };
+    start();
+    document.addEventListener("visibilitychange", syncVisibility);
     return () => {
-      window.cancelAnimationFrame(animationFrame);
-      document.removeEventListener("visibilitychange", resume);
+      stop();
+      document.removeEventListener("visibilitychange", syncVisibility);
     };
   }, [active, invalidate]);
 
@@ -157,11 +183,15 @@ function CameraRig({
   view,
   selectedModuleId,
   focusRevision,
+  cameraPanRevision,
   controlsRef,
   zonePositions,
+  laboratoryPosition,
 }: Pick<SceneProps, "view" | "selectedModuleId" | "focusRevision"> & {
+  cameraPanRevision: number;
   controlsRef: RefObject<OrbitControlsImpl | null>;
   zonePositions: ZonePositionMap;
+  laboratoryPosition?: ZonePosition;
 }) {
   const { camera, invalidate, size } = useThree();
   const destination = useRef(new THREE.Vector3());
@@ -183,6 +213,10 @@ function CameraRig({
     } else if (view === "structure") {
       destination.current.set(0, narrow ? 7 : 5.4, narrow ? 20 : 12.8);
       target.current.set(0, 1.05, 0);
+    } else if (view === "laboratory" && laboratoryPosition) {
+      const [x, y, z] = laboratoryPosition;
+      target.current.set(x, y + 1.05, z);
+      destination.current.set(x, y + (narrow ? 4.6 : 3.4), z + (narrow ? 9.2 : 6.5));
     } else if (selectedModuleId && zonePositions[selectedModuleId]) {
       const [x, y, z] = zonePositions[selectedModuleId];
       target.current.set(x, y + 0.92, z);
@@ -193,7 +227,11 @@ function CameraRig({
     }
     animating.current = true;
     invalidate();
-  }, [focusRevision, invalidate, selectedModuleId, size.height, size.width, view, zonePositions]);
+  }, [focusRevision, invalidate, laboratoryPosition, selectedModuleId, size.height, size.width, view, zonePositions]);
+
+  useEffect(() => {
+    if (cameraPanRevision > 0) animating.current = false;
+  }, [cameraPanRevision]);
 
   useFrame((_, delta) => {
     const controls = controlsRef.current;
@@ -241,7 +279,14 @@ function Dome({ visualStyle, locale, onSelect }: { visualStyle: "detailed" | "si
         <meshStandardMaterial color={detailed ? "#d9e4c4" : "#8be5b7"} metalness={detailed ? 0.62 : 0.18} roughness={0.3} />
       </mesh>
       <Html position={[0, 10.2, 0]} center distanceFactor={15} zIndexRange={[18, 0]}>
-        <button className="world-landmark-label" onClick={onSelect}>{t(locale, "structure.root")}</button>
+        <button
+          className="world-landmark-label"
+          onPointerDown={stopProjectedLabelEvent}
+          onPointerUp={stopProjectedLabelEvent}
+          onClick={(event) => selectFromProjectedLabel(event, onSelect)}
+        >
+          {t(locale, "structure.root")}
+        </button>
       </Html>
     </group>
   );
@@ -461,6 +506,10 @@ function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visu
     const end = new THREE.Vector3(Math.cos(angle + 0.42) * 2.1, 2.65 + (index % 2) * 0.52, Math.sin(angle + 0.42) * 2.1);
     return new THREE.CatmullRomCurve3([start, middle, end]);
   }) : [], [detailed]);
+  const vineLeafPositions = useMemo(
+    () => vines.map((curve) => [0.32, 0.61, 0.87].map((offset) => ({ offset, position: curve.getPoint(offset) }))),
+    [vines],
+  );
   return (
     <group
       userData={{ interactionPriority: INTERACTION_PRIORITY.landmark }}
@@ -564,8 +613,8 @@ function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visu
             <tubeGeometry args={[curve, 24, 0.035, 6, false]} />
             <meshStandardMaterial color={index % 2 ? "#467d43" : "#5b984f"} roughness={0.94} />
           </mesh>
-          {[0.32, 0.61, 0.87].map((offset) => (
-            <mesh key={offset} position={curve.getPoint(offset)} scale={[0.18, 0.08, 0.1]} rotation={[0, index * 0.5, 0.5]}>
+          {vineLeafPositions[index].map(({ offset, position }) => (
+            <mesh key={offset} position={position} scale={[0.18, 0.08, 0.1]} rotation={[0, index * 0.5, 0.5]}>
               <sphereGeometry args={[0.5, 8, 6]} />
               <meshStandardMaterial color="#78aa55" roughness={1} />
             </mesh>
@@ -594,7 +643,14 @@ function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visu
       {effects.glow && <pointLight position={[0, 4.5, 0]} color="#ffd36b" intensity={detailed ? 5.5 : 3.4} distance={9} />}
       {effects.particles && <Sparkles count={detailed ? 66 : 28} scale={[5.5, 6.5, 5.5]} size={detailed ? 1.8 : 2.4} speed={reducedMotion ? 0 : 0.22} color="#ffe59a" />}
       <Html position={[0, 7.55, 0]} center distanceFactor={11} zIndexRange={[19, 0]}>
-        <button className="world-landmark-label tree-label" onClick={onSelect}>{t(locale, "structure.tree")}</button>
+        <button
+          className="world-landmark-label tree-label"
+          onPointerDown={stopProjectedLabelEvent}
+          onPointerUp={stopProjectedLabelEvent}
+          onClick={(event) => selectFromProjectedLabel(event, onSelect)}
+        >
+          {t(locale, "structure.tree")}
+        </button>
       </Html>
     </group>
   );
@@ -967,18 +1023,20 @@ function OrganGlyph({ moduleId, color, detailed }: { moduleId: string; color: st
 function OrganSanctuary({ moduleId, color, activityActive, glowEnabled }: { moduleId: string; color: string; activityActive: boolean; glowEnabled: boolean }) {
   const glow = glowEnabled ? (activityActive ? 1.05 : 0.38) : 0.04;
   const ringMaterial = <meshStandardMaterial color={color} emissive={color} emissiveIntensity={glow} transparent opacity={activityActive ? 0.86 : 0.58} roughness={0.52} />;
+  const seedMemoryRoots = useMemo(() => Array.from({ length: 6 }, (_, index) => {
+    const angle = (index / 6) * Math.PI * 2;
+    return new THREE.CatmullRomCurve3([
+      new THREE.Vector3(Math.cos(angle) * 0.35, 0.34, Math.sin(angle) * 0.35),
+      new THREE.Vector3(Math.cos(angle + 0.14) * 1.05, 0.22, Math.sin(angle + 0.14) * 1.05),
+      new THREE.Vector3(Math.cos(angle) * 1.5, 0.14, Math.sin(angle) * 1.5),
+    ]);
+  }), []);
   if (moduleId === "seed-memory") {
     return (
       <group>
-        {Array.from({ length: 6 }, (_, index) => {
-          const angle = (index / 6) * Math.PI * 2;
-          const curve = new THREE.CatmullRomCurve3([
-            new THREE.Vector3(Math.cos(angle) * 0.35, 0.34, Math.sin(angle) * 0.35),
-            new THREE.Vector3(Math.cos(angle + 0.14) * 1.05, 0.22, Math.sin(angle + 0.14) * 1.05),
-            new THREE.Vector3(Math.cos(angle) * 1.5, 0.14, Math.sin(angle) * 1.5),
-          ]);
-          return <mesh key={index}><tubeGeometry args={[curve, 18, 0.035, 6, false]} />{ringMaterial}</mesh>;
-        })}
+        {seedMemoryRoots.map((curve, index) => (
+          <mesh key={index}><tubeGeometry args={[curve, 18, 0.035, 6, false]} />{ringMaterial}</mesh>
+        ))}
         {[0, 1, 2].map((index) => {
           const angle = index * Math.PI * 2 / 3 + 0.4;
           return <mesh key={index} position={[Math.cos(angle) * 1.38, 0.28, Math.sin(angle) * 1.38]} scale={[0.12, 0.25, 0.12]}><dodecahedronGeometry args={[1, 0]} />{ringMaterial}</mesh>;
@@ -1237,9 +1295,182 @@ function Zone({
         </mesh>
       )}
       <Html position={[0, 2.08, 0]} center distanceFactor={11} zIndexRange={[20, 0]}>
-        <button className={`scene-label ${selected ? "is-selected" : ""}`} onClick={onSelect}>
+        <button
+          className={`scene-label ${selected ? "is-selected" : ""}`}
+          onPointerDown={stopProjectedLabelEvent}
+          onPointerUp={stopProjectedLabelEvent}
+          onClick={(event) => selectFromProjectedLabel(event, onSelect)}
+        >
           <span className="status-dot" data-status={module.health.status} />
           {moduleName(locale, module.id, module.name)}
+        </button>
+      </Html>
+    </group>
+  );
+}
+
+function deriveLaboratoryPosition(zonePositions: ZonePositionMap): ZonePosition | undefined {
+  const evolution = zonePositions.evolution;
+  if (!evolution) return undefined;
+  const radialLength = Math.hypot(evolution[0], evolution[2]) || 1;
+  return [
+    evolution[0] + (evolution[0] / radialLength) * LABORATORY_OFFSET,
+    Math.max(0.08, evolution[1] - 0.16),
+    evolution[2] + (evolution[2] / radialLength) * LABORATORY_OFFSET,
+  ];
+}
+
+function DirectionMarker({
+  curve,
+  progress,
+  color,
+  reverse = false,
+}: {
+  curve: THREE.CatmullRomCurve3;
+  progress: number;
+  color: string;
+  reverse?: boolean;
+}) {
+  const { position, quaternion } = useMemo(() => {
+    const point = curve.getPointAt(progress);
+    const tangent = curve.getTangentAt(progress).normalize().multiplyScalar(reverse ? -1 : 1);
+    return {
+      position: point,
+      quaternion: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), tangent),
+    };
+  }, [curve, progress, reverse]);
+  return (
+    <mesh position={position} quaternion={quaternion}>
+      <coneGeometry args={[0.095, 0.28, 7]} />
+      <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.72} roughness={0.38} />
+    </mesh>
+  );
+}
+
+function LaboratoryConnection({
+  evolutionPosition,
+  laboratoryPosition,
+  locale,
+  related,
+  glowEnabled,
+}: {
+  evolutionPosition: ZonePosition;
+  laboratoryPosition: ZonePosition;
+  locale: Locale;
+  related: boolean;
+  glowEnabled: boolean;
+}) {
+  const { forward, returnPath, midpoint } = useMemo(() => {
+    const start = new THREE.Vector3(...evolutionPosition).add(new THREE.Vector3(0, 0.62, 0));
+    const end = new THREE.Vector3(...laboratoryPosition).add(new THREE.Vector3(0, 0.62, 0));
+    const direction = end.clone().sub(start);
+    const side = new THREE.Vector3(-direction.z, 0, direction.x).normalize().multiplyScalar(0.09);
+    const center = start.clone().lerp(end, 0.5).add(new THREE.Vector3(0, 0.34, 0));
+    return {
+      forward: new THREE.CatmullRomCurve3([start.clone().add(side), center.clone().add(side), end.clone().add(side)]),
+      returnPath: new THREE.CatmullRomCurve3([start.clone().sub(side), center.clone().sub(side), end.clone().sub(side)]),
+      midpoint: center,
+    };
+  }, [evolutionPosition, laboratoryPosition]);
+  const opacity = related ? 0.9 : 0.42;
+  return (
+    <group userData={{ interactionPriority: INTERACTION_PRIORITY.landmark }}>
+      <mesh><tubeGeometry args={[forward, 28, related ? 0.035 : 0.026, 6, false]} /><meshStandardMaterial color="#e2c878" emissive="#b99842" emissiveIntensity={glowEnabled ? (related ? 0.9 : 0.35) : 0.04} transparent opacity={opacity} /></mesh>
+      <mesh><tubeGeometry args={[returnPath, 28, related ? 0.035 : 0.026, 6, false]} /><meshStandardMaterial color="#74d6b0" emissive="#3b9d79" emissiveIntensity={glowEnabled ? (related ? 0.9 : 0.35) : 0.04} transparent opacity={opacity} /></mesh>
+      <DirectionMarker curve={forward} progress={0.62} color="#e2c878" />
+      <DirectionMarker curve={returnPath} progress={0.38} color="#74d6b0" reverse />
+      <Html position={[midpoint.x, midpoint.y + 0.32, midpoint.z]} center distanceFactor={13} zIndexRange={[16, 0]}>
+        <span className={`facility-link-label ${related ? "is-related" : ""}`}>{t(locale, "lab.scene_relationship")}</span>
+      </Html>
+    </group>
+  );
+}
+
+function LaboratoryFacility({
+  position,
+  locale,
+  visualStyle,
+  selected,
+  related,
+  effects,
+  onSelect,
+}: {
+  position: ZonePosition;
+  locale: Locale;
+  visualStyle: "detailed" | "simple";
+  selected: boolean;
+  related: boolean;
+  effects: ActiveVisualEffects;
+  onSelect: () => void;
+}) {
+  const detailed = visualStyle === "detailed";
+  const glow = effects.glow ? (selected ? 1.15 : related ? 0.72 : 0.34) : 0.04;
+  const pillars = detailed ? 8 : 4;
+  return (
+    <group
+      position={position}
+      userData={{ interactionPriority: INTERACTION_PRIORITY.foreground }}
+      onClick={(event) => selectFromPointer(event, onSelect)}
+      onPointerOver={() => { document.body.style.cursor = "pointer"; }}
+      onPointerOut={() => { document.body.style.cursor = "default"; }}
+    >
+      <mesh position={[0, 1.08, 0]} scale={[1.15, 0.95, 1.15]}>
+        <sphereGeometry args={[1.75, 16, 12]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false} />
+      </mesh>
+      <mesh position={[0, -0.14, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[1.36, 1.58, 0.36, 12]} />
+        <meshStandardMaterial color={detailed ? "#676d5f" : "#527466"} roughness={0.92} />
+      </mesh>
+      <mesh position={[0, 0.08, 0]} castShadow receiveShadow>
+        <cylinderGeometry args={[1.18, 1.34, 0.22, 12]} />
+        <meshStandardMaterial color="#8b8a70" emissive="#8f7341" emissiveIntensity={0.08} roughness={0.84} />
+      </mesh>
+      {Array.from({ length: pillars }, (_, index) => {
+        const angle = (index / pillars) * Math.PI * 2 + Math.PI / 8;
+        return (
+          <group key={index} position={[Math.cos(angle) * 0.94, 0.92, Math.sin(angle) * 0.94]}>
+            <mesh castShadow><cylinderGeometry args={[0.06, 0.09, 1.58, 6]} /><meshStandardMaterial color="#70573b" roughness={0.82} /></mesh>
+            {detailed && <mesh position={[0, 0.18, 0]} scale={[0.075, 0.46, 0.075]}><boxGeometry /><meshStandardMaterial color="#d6b86e" emissive="#b8913f" emissiveIntensity={glow * 0.45} /></mesh>}
+          </group>
+        );
+      })}
+      <mesh position={[0, 1.67, 0]} castShadow>
+        <coneGeometry args={[1.28, 0.62, 8, 1, true]} />
+        <meshPhysicalMaterial color="#99c8b8" transparent opacity={detailed ? 0.32 : 0.48} transmission={detailed ? 0.42 : 0.08} roughness={0.28} side={THREE.DoubleSide} />
+      </mesh>
+      <mesh position={[0, 1.93, 0]}>
+        <octahedronGeometry args={[0.17, 0]} />
+        <meshStandardMaterial color="#f0d58b" emissive="#e2b954" emissiveIntensity={glow} roughness={0.3} />
+      </mesh>
+      <group position={[0, 0.72, 0]}>
+        <mesh scale={[0.46, 0.36, 0.46]} castShadow>
+          <sphereGeometry args={[0.62, detailed ? 18 : 10, detailed ? 14 : 8]} />
+          <meshPhysicalMaterial color="#a8e7d0" transparent opacity={0.48} transmission={detailed ? 0.46 : 0.12} roughness={0.2} />
+        </mesh>
+        <mesh position={[0, 0.34, 0]}>
+          <cylinderGeometry args={[0.12, 0.16, 0.48, 10]} />
+          <meshPhysicalMaterial color="#d7f0e7" transparent opacity={0.56} roughness={0.18} />
+        </mesh>
+        <mesh position={[0, -0.08, 0]} scale={[0.34, 0.18, 0.34]}>
+          <sphereGeometry args={[0.55, 12, 9]} />
+          <meshStandardMaterial color="#ddc06c" emissive="#d9a941" emissiveIntensity={glow * 1.1} transparent opacity={0.86} />
+        </mesh>
+      </group>
+      <mesh position={[0, 0.13, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[selected ? 1.28 : 1.16, selected ? 1.38 : 1.25, 40]} />
+        <meshBasicMaterial color={selected ? "#ffe09a" : "#7fdfbd"} transparent opacity={selected ? 0.9 : 0.42} />
+      </mesh>
+      <Html position={[0, 2.45, 0]} center distanceFactor={11} zIndexRange={[20, 0]}>
+        <button
+          className={`scene-label facility-label ${selected ? "is-selected" : ""}`}
+          aria-label={t(locale, "lab.title")}
+          onPointerDown={stopProjectedLabelEvent}
+          onPointerUp={stopProjectedLabelEvent}
+          onClick={(event) => selectFromProjectedLabel(event, onSelect)}
+        >
+          <span className="facility-symbol" aria-hidden="true">⌬</span>
+          {t(locale, "lab.title")}
         </button>
       </Html>
     </group>
@@ -1301,6 +1532,10 @@ function ConnectionArc({
   }, [curve]);
   const labelPosition = useMemo(() => curve.getPoint(0.5), [curve]);
   const targetPosition = useMemo(() => curve.getPoint(1), [curve]);
+  const signalStartPositions = useMemo(
+    () => Array.from({ length: detailed ? 3 : 2 }, (_, index) => curve.getPoint(0.2 + index * 0.45)),
+    [curve, detailed],
+  );
 
   useFrame(({ clock }) => {
     if (!flowEnabled) return;
@@ -1352,11 +1587,11 @@ function ConnectionArc({
         <coneGeometry args={[adjacent ? 0.115 : 0.08, adjacent ? 0.32 : 0.24, 8]} />
         <meshStandardMaterial color={color} emissive={color} emissiveIntensity={glowEnabled ? (adjacent ? 1.1 : 0.55) : 0.05} transparent opacity={adjacent ? 0.94 : 0.58} depthTest={false} depthWrite={false} />
       </mesh>
-      {flowEnabled && Array.from({ length: detailed ? 3 : 2 }, (_, index) => (
+      {flowEnabled && signalStartPositions.map((position, index) => (
         <group
           key={index}
           ref={(node) => { signals.current[index] = node; }}
-          position={curve.getPoint(0.2 + index * 0.45)}
+          position={position}
         >
           <mesh renderOrder={8}>
             <sphereGeometry args={[adjacent ? 0.085 : 0.058, 12, 9]} />
@@ -1431,21 +1666,24 @@ function RootNetwork({
   visualStyle: "detailed" | "simple";
   effects: ActiveVisualEffects;
 }) {
-  const visibleCards = cards.filter((card) => card.lifecycle === "active").slice(0, 24);
+  const visibleCards = useMemo(() => cards.filter((card) => card.lifecycle === "active").slice(0, 24), [cards]);
   const branchCount = visualStyle === "detailed" ? 18 : 8;
+  const branches = useMemo(() => Array.from({ length: branchCount }, (_, index) => {
+    const angle = (index / branchCount) * Math.PI * 2;
+    if (visualStyle !== "detailed") return { angle, curve: null };
+    const start = new THREE.Vector3(0, 0.02, 0);
+    const middle = new THREE.Vector3(Math.cos(angle + 0.16) * 1.8, 0.04, Math.sin(angle + 0.16) * 1.8);
+    const end = new THREE.Vector3(Math.cos(angle) * (4.2 + (index % 3) * 0.28), 0.02, Math.sin(angle) * (4.2 + (index % 3) * 0.28));
+    return { angle, curve: new THREE.CatmullRomCurve3([start, middle, end]) };
+  }), [branchCount, visualStyle]);
   return (
     <group position={[-3.8, -0.72, 0.5]}>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]}>
         <circleGeometry args={[5.1, 48]} />
         <meshStandardMaterial color="#163d32" roughness={0.9} />
       </mesh>
-      {Array.from({ length: branchCount }, (_, index) => {
-        const angle = (index / branchCount) * Math.PI * 2;
-        if (visualStyle === "detailed") {
-          const start = new THREE.Vector3(0, 0.02, 0);
-          const middle = new THREE.Vector3(Math.cos(angle + 0.16) * 1.8, 0.04, Math.sin(angle + 0.16) * 1.8);
-          const end = new THREE.Vector3(Math.cos(angle) * (4.2 + (index % 3) * 0.28), 0.02, Math.sin(angle) * (4.2 + (index % 3) * 0.28));
-          const curve = new THREE.CatmullRomCurve3([start, middle, end]);
+      {branches.map(({ angle, curve }, index) => {
+        if (curve) {
           return (
             <mesh key={index}>
               <tubeGeometry args={[curve, 28, index % 3 === 0 ? 0.075 : 0.045, 6, false]} />
@@ -1477,7 +1715,14 @@ function RootNetwork({
             </mesh>
             {selected && (
               <Html position={[0, 0.62, 0]} center distanceFactor={8}>
-                <button className="scene-label is-selected" onClick={() => onSelectCard(card.id)}>{cardDisplayName(locale, card)}</button>
+                <button
+                  className="scene-label is-selected"
+                  onPointerDown={stopProjectedLabelEvent}
+                  onPointerUp={stopProjectedLabelEvent}
+                  onClick={(event) => selectFromProjectedLabel(event, () => onSelectCard(card.id))}
+                >
+                  {cardDisplayName(locale, card)}
+                </button>
               </Html>
             )}
           </group>
@@ -1603,16 +1848,16 @@ function StructureNetwork({
   const children = selected ? structure.nodes.filter((node) => node.parent_id === selected.id) : [];
   const visible = children.slice(0, 20);
   const moduleIndex = useMemo(() => new Map(modules.map((module) => [module.id, module])), [modules]);
-  if (!selected) return null;
-  const childPositions = visible.map((_, index) => {
+  const childPositions = useMemo(() => Array.from({ length: visible.length }, (_, index) => {
     const ring = index < 9 ? 0 : 1;
     const ringItems = ring === 0 ? Math.min(visible.length, 9) : visible.length - 9;
     const ringIndex = ring === 0 ? index : index - 9;
     const angle = (ringIndex / Math.max(ringItems, 1)) * Math.PI * 2 - Math.PI / 2;
     const radius = ring === 0 ? 3.45 : 5.4;
     return new THREE.Vector3(Math.cos(angle) * radius, ring === 0 ? 0.55 : 0.25, Math.sin(angle) * radius);
-  });
-  const center = new THREE.Vector3(0, 1.05, 0);
+  }), [visible.length]);
+  const center = useMemo(() => new THREE.Vector3(0, 1.05, 0), []);
+  if (!selected) return null;
   return (
     <group>
       <mesh position={[0, -0.08, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -1626,7 +1871,12 @@ function StructureNetwork({
       <group position={center} scale={1.28}>
         <StructureGlyph node={selected} module={moduleIndex.get(selected.module_id)} selected />
         <Html position={[0, 2.25, 0]} center distanceFactor={9} zIndexRange={[22, 0]}>
-          <button className="structure-node-label is-current" onClick={() => onSelect(selected.id)}>
+          <button
+            className="structure-node-label is-current"
+            onPointerDown={stopProjectedLabelEvent}
+            onPointerUp={stopProjectedLabelEvent}
+            onClick={(event) => selectFromProjectedLabel(event, () => onSelect(selected.id))}
+          >
             <strong>{structureDisplayName(locale, selected)}</strong><small>{t(locale, `structure.kind.${selected.kind}`)} · {t(locale, "structure.child_count", { count: selected.child_count })}</small>
           </button>
         </Html>
@@ -1646,7 +1896,12 @@ function StructureNetwork({
             >
               <StructureGlyph node={node} module={moduleIndex.get(node.module_id)} selected={false} />
               <Html position={[0, 1.85, 0]} center distanceFactor={10} zIndexRange={[20, 0]}>
-                <button className="structure-node-label" onClick={() => onSelect(node.id)}>
+                <button
+                  className="structure-node-label"
+                  onPointerDown={stopProjectedLabelEvent}
+                  onPointerUp={stopProjectedLabelEvent}
+                  onClick={(event) => selectFromProjectedLabel(event, () => onSelect(node.id))}
+                >
                   <strong>{structureDisplayName(locale, node)}</strong><small>{t(locale, `structure.kind.${node.kind}`)}</small>
                 </button>
               </Html>
@@ -1664,7 +1919,7 @@ function StructureNetwork({
   );
 }
 
-function World(props: SceneProps) {
+function World(props: SceneProps & { cameraPanCommand: CameraPanCommand }) {
   const visualStyle = props.backgroundMode === "detailed" ? "detailed" : "simple";
   const detailedWorld = props.backgroundMode === "detailed";
   const reducedMotion = useReducedMotion();
@@ -1677,7 +1932,10 @@ function World(props: SceneProps) {
   }), [props.visualEffects]);
   const idleAnimationActive = !reducedMotion && (effects.particles || effects.flow || effects.motion);
   const zonePositions = useMemo(() => buildZonePositions(props.modules), [props.modules]);
-  const { gl, setDpr, size } = useThree();
+  const laboratoryPosition = useMemo(() => deriveLaboratoryPosition(zonePositions), [zonePositions]);
+  const overviewScene = props.view === "overview" || props.view === "laboratory";
+  const laboratoryRelated = props.view === "laboratory" || props.selectedModuleId === "evolution";
+  const { camera, gl, invalidate, setDpr, size } = useThree();
   const narrowViewport = size.width / Math.max(size.height, 1) < 0.72;
   const restingDpr = Math.min(
     window.devicePixelRatio || 1,
@@ -1696,6 +1954,7 @@ function World(props: SceneProps) {
   const effectDistance = useRef<EffectDistance>("far");
   const dprRestoreTimer = useRef<number | undefined>(undefined);
   const initialDprSync = useRef(true);
+  const appliedCameraPanRevision = useRef(0);
   const interactionOrigin = useRef<{ camera: THREE.Vector3; target: THREE.Vector3 } | null>(null);
   const interactionClosedPanel = useRef(false);
   useEffect(() => {
@@ -1754,6 +2013,32 @@ function World(props: SceneProps) {
     effectDistance.current = next;
     props.onEffectDistanceChange(next);
   });
+  useEffect(() => {
+    const command = props.cameraPanCommand;
+    const controls = controlsRef.current;
+    if (!controls || command.revision <= appliedCameraPanRevision.current) return;
+
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    right.y = 0;
+    if (right.lengthSq() < 0.0001) right.set(1, 0, 0);
+    const panStep = THREE.MathUtils.clamp(camera.position.distanceTo(controls.target) * 0.075, 0.55, 1.4);
+    right.normalize().multiplyScalar(command.direction * panStep);
+
+    const nextTarget = controls.target.clone().add(right);
+    const planarTarget = new THREE.Vector2(nextTarget.x, nextTarget.z);
+    if (planarTarget.length() > MAX_CAMERA_PAN_RADIUS) {
+      planarTarget.setLength(MAX_CAMERA_PAN_RADIUS);
+      nextTarget.x = planarTarget.x;
+      nextTarget.z = planarTarget.y;
+    }
+    const appliedMovement = nextTarget.sub(controls.target);
+    camera.position.add(appliedMovement);
+    controls.target.add(appliedMovement);
+    controls.update();
+    appliedCameraPanRevision.current = command.revision;
+    props.onSceneInteraction();
+    invalidate();
+  }, [camera, invalidate, props.cameraPanCommand, props.onSceneInteraction]);
   function beginSceneInteraction() {
     const controls = controlsRef.current;
     if (!controls) return;
@@ -1792,8 +2077,10 @@ function World(props: SceneProps) {
         view={props.view}
         selectedModuleId={props.selectedModuleId}
         focusRevision={props.focusRevision}
+        cameraPanRevision={props.cameraPanCommand.revision}
         controlsRef={controlsRef}
         zonePositions={zonePositions}
+        laboratoryPosition={laboratoryPosition}
       />
       {props.backgroundMode !== "none" && props.view !== "structure" && (
         <>
@@ -1824,10 +2111,10 @@ function World(props: SceneProps) {
           />}
         </>
       )}
-      {props.view === "overview" && (
+      {overviewScene && (
         <>{props.backgroundMode === "detailed" && <RootPaths activeModuleIds={props.activeModuleIds} zonePositions={zonePositions} glowEnabled={effects.glow} />}</>
       )}
-      {props.view === "overview" && (
+      {overviewScene && (
         <ConnectionNetwork
           connections={props.connections}
           zonePositions={zonePositions}
@@ -1838,19 +2125,39 @@ function World(props: SceneProps) {
           effects={effects}
         />
       )}
-      {props.view === "overview" && props.modules.map((module) => (
+      {overviewScene && props.modules.map((module) => (
         <Zone
           key={module.id}
           module={module}
           position={zonePositions[module.id]}
           locale={props.locale}
           visualStyle={visualStyle}
-          selected={module.id === props.selectedModuleId}
+          selected={module.id === props.selectedModuleId || (props.view === "laboratory" && module.id === "evolution")}
           activityActive={props.activeModuleIds.includes(module.id)}
           effects={effects}
           onSelect={() => props.onSelectModule(module.id)}
         />
       ))}
+      {overviewScene && laboratoryPosition && zonePositions.evolution && (
+        <>
+          <LaboratoryConnection
+            evolutionPosition={zonePositions.evolution}
+            laboratoryPosition={laboratoryPosition}
+            locale={props.locale}
+            related={laboratoryRelated}
+            glowEnabled={effects.glow}
+          />
+          <LaboratoryFacility
+            position={laboratoryPosition}
+            locale={props.locale}
+            visualStyle={visualStyle}
+            selected={props.view === "laboratory"}
+            related={laboratoryRelated}
+            effects={effects}
+            onSelect={props.onSelectLaboratory}
+          />
+        </>
+      )}
       {props.view === "seed" && (
         <RootNetwork
           cards={props.cards}
@@ -1882,7 +2189,13 @@ function World(props: SceneProps) {
         maxDistance={narrowViewport ? 48 : 24}
         minPolarAngle={0.42}
         maxPolarAngle={Math.PI / 2.05}
-        target={props.view === "seed" ? [-3.8, -0.5, 0.5] : props.view === "structure" ? [0, 1.05, 0] : [0, 1.2, 0]}
+        target={props.view === "seed"
+          ? [-3.8, -0.5, 0.5]
+          : props.view === "structure"
+            ? [0, 1.05, 0]
+            : props.view === "laboratory" && laboratoryPosition
+              ? [laboratoryPosition[0], laboratoryPosition[1] + 1.05, laboratoryPosition[2]]
+              : [0, 1.2, 0]}
         onStart={beginSceneInteraction}
         onChange={observeSceneInteraction}
         onEnd={endSceneInteraction}
@@ -1892,6 +2205,24 @@ function World(props: SceneProps) {
 }
 
 export function CanopyScene(props: SceneProps) {
+  const [cameraPanCommand, setCameraPanCommand] = useState<CameraPanCommand>({ direction: 1, revision: 0 });
+  const requestCameraPan = useCallback((direction: CameraPanDirection) => {
+    setCameraPanCommand((current) => ({ direction, revision: current.revision + 1 }));
+  }, []);
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target?.closest("input, textarea, select, button, [contenteditable='true']")) return;
+      const shell = document.querySelector<HTMLElement>(".app-shell");
+      if (shell?.dataset.settings === "open" || shell?.dataset.view === "timeline") return;
+      event.preventDefault();
+      requestCameraPan(event.key === "ArrowLeft" ? -1 : 1);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [requestCameraPan]);
   const canvasAnimationActive = props.visualEffects.master && (
     props.visualEffects.particles
     || props.visualEffects.flow
@@ -1901,23 +2232,46 @@ export function CanopyScene(props: SceneProps) {
     ? (props.backgroundMode === "detailed" ? 1.25 : 1.15)
     : (props.backgroundMode === "detailed" ? 1.55 : 1.35);
   return (
-    <Canvas
-      className="canopy-canvas"
-      data-render-policy={canvasAnimationActive ? "adaptive-idle-12" : "interaction-only"}
-      data-animation-budget-fps={canvasAnimationActive ? "12" : "0"}
-      data-shadow-policy="state-driven"
-      data-interaction-dpr-policy="temporary-1x"
-      frameloop="demand"
-      shadows
-      dpr={[1, maximumDpr]}
-      camera={{ position: [0, 8.4, 18.8], fov: 43, near: 0.1, far: 80 }}
-      gl={{ antialias: true, powerPreference: "default", alpha: true }}
-      events={(state) => ({
-        ...createPointerEvents(state),
-        filter: prioritizeIntersections,
-      })}
-    >
-      <World {...props} />
-    </Canvas>
+    <>
+      <Canvas
+        className="canopy-canvas"
+        data-render-policy={canvasAnimationActive ? "adaptive-idle-10" : "interaction-only"}
+        data-animation-budget-fps={canvasAnimationActive ? "10" : "0"}
+        data-shadow-policy="state-driven"
+        data-interaction-dpr-policy="temporary-1x"
+        frameloop="demand"
+        shadows
+        dpr={[1, maximumDpr]}
+        camera={{ position: [0, 8.4, 18.8], fov: 43, near: 0.1, far: 80 }}
+        gl={{ antialias: true, powerPreference: "default", alpha: true }}
+        events={(state) => ({
+          ...createPointerEvents(state),
+          filter: prioritizeIntersections,
+        })}
+      >
+        <World {...props} cameraPanCommand={cameraPanCommand} />
+      </Canvas>
+      <div className="camera-pan-controls" role="group" aria-label={t(props.locale, "camera.controls")}>
+        <button
+          type="button"
+          aria-label={t(props.locale, "camera.left")}
+          aria-keyshortcuts="ArrowLeft"
+          title={t(props.locale, "camera.left")}
+          onClick={() => requestCameraPan(-1)}
+        >
+          <ArrowLeft size={17} />
+        </button>
+        <span aria-hidden="true">{t(props.locale, "camera.pan")}</span>
+        <button
+          type="button"
+          aria-label={t(props.locale, "camera.right")}
+          aria-keyshortcuts="ArrowRight"
+          title={t(props.locale, "camera.right")}
+          onClick={() => requestCameraPan(1)}
+        >
+          <ArrowRight size={17} />
+        </button>
+      </div>
+    </>
   );
 }

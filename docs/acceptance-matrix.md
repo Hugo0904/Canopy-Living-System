@@ -40,8 +40,8 @@ exist. Later requests extend this list instead of replacing earlier items.
 
 | ID | Requirement | Status | Evidence |
 | --- | --- | --- | --- |
-| A01 | Multiple distinct, non-vocal, natural/acoustic/piano compositions. | Implemented | Nine complete, locally hosted and licensed tracks, including the original `Sakuya4` master with a non-destructive playback trim. |
-| A02 | Music selection changes the actual composition instead of replaying one short arrangement. | Implemented | `ambientBgm.ts` maps every choice to a distinct 85-235 second track and crossfades on change |
+| A01 | Multiple distinct, non-vocal, natural/acoustic/piano compositions. | Implemented | Fourteen complete, locally hosted and licensed tracks, including five credited multi-instrument Japanese/Celtic candidates and the original `Sakuya4` master with non-destructive playback trims. |
+| A02 | Music selection changes the actual composition instead of replaying one short arrangement. | Implemented | `ambientBgm.ts` maps every choice to a distinct 79-236 second track and crossfades on change |
 | A03 | BGM track, volume, and enabled state survive reload; enabled BGM starts on the first allowed gesture. | Implemented | `localStorage`, hidden observable audio element, and browser activation listener |
 | A04 | Buttons have restrained interaction sound. | Implemented | `playUiClick()` |
 | A05 | The user can raise BGM to a normalized full-volume ceiling and see source/license attribution. | Implemented | 0-100% volume control, 88% default, and per-track source/license links |

@@ -3,12 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "tsc -b --pretty false",
     "preview": "vite preview --host 127.0.0.1",
-    "visual:test": "node scripts/visual_check.mjs"
+    "visual:test": "node scripts/visual_check.mjs",
+    "test:life": "node scripts/life_stories_check.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.4",

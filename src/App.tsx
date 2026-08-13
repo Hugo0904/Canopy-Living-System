@@ -10,6 +10,7 @@ import {
   Database,
   Dna,
   FileCode2,
+  FlaskConical,
   FolderTree,
   GitBranch,
   Home,
@@ -30,11 +31,12 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { fetchLifeEvents, fetchSnapshot, syncSnapshot } from "./api";
+import { fetchLifeEventRevision, fetchLifeEvents, fetchSnapshot, fetchSnapshotRevision, syncSnapshot } from "./api";
 import { AmbientBgm, ambientTrackInfo, playUiClick, type AmbientTrackId } from "./audio/ambientBgm";
 import { CanopyScene, type EffectDistance, type VisualEffects } from "./components/CanopyScene";
 import { ActivityTimeline } from "./components/ActivityTimeline";
 import { EvolutionLab } from "./components/EvolutionLab";
+import { IssueTreatmentPanel } from "./components/IssueTreatmentPanel";
 import { LifeStreamPanel } from "./components/LifeStreamPanel";
 import { TreatmentComposer } from "./components/TreatmentComposer";
 import {
@@ -43,6 +45,7 @@ import {
   cardDisplayName,
   localizedCategory,
   localizedDimension,
+  localizedIssueDetail,
   localizedIssueTitle,
   localizedLifecycle,
   localizedSource,
@@ -55,10 +58,11 @@ import {
   t,
   type Locale,
 } from "./i18n";
-import type { ActivityEvent, ActivityProjection, CanopyConnection, CanopySnapshot, HealthStatus, LifeEventsResponse, ModuleHealth, SeedCard, StructureNode, TreatmentTarget } from "./types";
+import type { ActivityEvent, ActivityProjection, CanopyConnection, CanopyIssue, CanopySnapshot, HealthStatus, LifeEventsResponse, ModuleHealth, SeedCard, SnapshotSyncState, StructureNode, TreatmentTarget } from "./types";
+import { eventPayloadRevision } from "./lifeStories";
 
 type BackgroundMode = "detailed" | "simple" | "none";
-type ObservatoryView = "overview" | "seed" | "structure" | "timeline";
+type ObservatoryView = "overview" | "seed" | "structure" | "laboratory" | "timeline";
 type SettingsTab = "general" | "effects";
 type VisualEffectKey = Exclude<keyof VisualEffects, "master">;
 
@@ -93,6 +97,11 @@ const VISUAL_EFFECT_KEYS: VisualEffectKey[] = ["particles", "flow", "clouds", "g
 const MUSIC_TRACKS: AmbientTrackId[] = [
   "sacred-grove",
   "sakuya4",
+  "hanagoyomi2",
+  "moonlit-overture",
+  "poema",
+  "deep-woods5",
+  "otogi3",
   "shrine-ritual",
   "ancient-temple",
   "greenhouse",
@@ -101,6 +110,29 @@ const MUSIC_TRACKS: AmbientTrackId[] = [
   "clear-sky",
   "sunlit-piano",
 ];
+
+function lifeSyncDisplayRevision(sync: LifeEventsResponse["sync"]): string {
+  return JSON.stringify([
+    sync.status,
+    sync.last_error,
+    sync.persisted,
+    sync.truncated,
+    sync.omitted,
+    sync.coverage,
+  ]);
+}
+
+function snapshotSyncDisplayRevision(sync: SnapshotSyncState): string {
+  return JSON.stringify([
+    sync.status,
+    sync.last_error,
+    sync.observation_state,
+    sync.projection_state,
+    sync.using_last_verified,
+    sync.contract,
+    sync.topology,
+  ]);
+}
 
 function deriveStructureNavigationState(
   nodes: StructureNode[],
@@ -163,7 +195,7 @@ function storedVisualEffects(): VisualEffects {
 }
 
 function MetricValue({ value, locale }: { value: unknown; locale: Locale }) {
-  if (value === null || value === undefined || value === "") return <span>{t(locale, "common.unreported")}</span>;
+  if (value === null || value === undefined || value === "") return <span>{t(locale, "common.data_unavailable")}</span>;
   if (typeof value === "number") return <span>{value.toLocaleString(locale)}</span>;
   return <span>{String(value)}</span>;
 }
@@ -174,6 +206,99 @@ function StatusPill({ status, locale }: { status: HealthStatus; locale: Locale }
       <span className="status-dot" data-status={status} />
       {t(locale, `status.${status}`)}
     </span>
+  );
+}
+
+function issueIdentity(issue: CanopyIssue, index: number): string {
+  return issue.id || `${issue.code || "issue"}:${issue.title}:${index}`;
+}
+
+function issueOwner(locale: Locale, owner?: string): string {
+  if (!owner) return t(locale, "issue_detail.owner_unreported");
+  const localized = t(locale, `owner.${owner}`);
+  return localized === `owner.${owner}` ? owner : localized;
+}
+
+function issueState(locale: Locale, issue: CanopyIssue): string {
+  const state = issue.remediation?.state || issue.state;
+  if (!state) return t(locale, "issue_detail.state_unreported");
+  const localized = t(locale, `issue_state.${state}`);
+  return localized === `issue_state.${state}` ? state : localized;
+}
+
+function IssueInspector({
+  issue,
+  locale,
+  position,
+  count,
+  onPrevious,
+  onNext,
+  onTreat,
+  onClose,
+}: {
+  issue: CanopyIssue;
+  locale: Locale;
+  position: number;
+  count: number;
+  onPrevious: () => void;
+  onNext: () => void;
+  onTreat: () => void;
+  onClose: () => void;
+}) {
+  const rawVerification = typeof issue.verification === "string"
+    ? issue.verification
+    : issue.verification?.summary || issue.verification?.status || issue.remediation?.verification;
+  const verification = rawVerification === "observe one real PreToolUse/PostToolUse pair"
+    ? t(locale, "issue_verification.real_tool_pair")
+    : rawVerification === "canopy doctor --json"
+      ? t(locale, "issue_verification.doctor")
+      : rawVerification?.startsWith("Re-run Seed health and confirm")
+        ? t(locale, "issue_verification.seed_operator_review")
+        : rawVerification;
+  const actionId = issue.remediation?.action_id;
+  const localizedAction = actionId ? t(locale, `issue_action.${actionId}`) : "";
+  const action = issue.remediation?.summary
+    || (localizedAction && localizedAction !== `issue_action.${actionId}` ? localizedAction : "")
+    || issue.remediation?.next_action
+    || issue.remediation?.command;
+  const automatic = issue.remediation?.automatic === true || issue.remediation?.mode === "auto_safe";
+  const requiresOperator = issue.requires_operator === true
+    || issue.remediation?.mode === "operator_required"
+    || issue.remediation?.state === "needs_operator"
+    || issue.state === "needs_operator";
+  const detail = issue.code === "doctor_runtime_verification_pending"
+    ? t(locale, "issue_detail.doctor_runtime_pending_detail")
+    : issue.id === "review-pressure:due-cards"
+      ? t(locale, "issue_detail.seed_review_due_cards_detail")
+      : localizedIssueDetail(locale, issue);
+  const requestable = issue.remediation?.requestable === true;
+  return (
+    <section className="issue-inspector" role="dialog" aria-label={t(locale, "issue_detail.title")}>
+      <header>
+        <StatusPill status={issue.severity} locale={locale} />
+        <div className="issue-inspector-controls">
+          {count > 1 && <>
+            <button aria-label={t(locale, "issue_detail.previous")} onClick={onPrevious}><ArrowLeft size={14} /></button>
+            <span aria-label={t(locale, "issue_detail.position", { current: position + 1, count })}>{position + 1}/{count}</span>
+            <button aria-label={t(locale, "issue_detail.next")} onClick={onNext}><ArrowRight size={14} /></button>
+          </>}
+          <button aria-label={t(locale, "common.close")} onClick={onClose}><X size={15} /></button>
+        </div>
+      </header>
+      <span className="issue-inspector-owner">{issueOwner(locale, issue.owner)}</span>
+      <h2>{localizedIssueTitle(locale, issue)}</h2>
+      <p>{detail}</p>
+      <dl>
+        <div><dt>{t(locale, "issue_detail.state")}</dt><dd>{issueState(locale, issue)}</dd></div>
+        <div><dt>{t(locale, "issue_detail.automatic")}</dt><dd>{automatic ? t(locale, "issue_detail.automatic_yes") : requiresOperator ? t(locale, "issue_detail.needs_operator") : t(locale, "issue_detail.automatic_unreported")}</dd></div>
+        {action && <div><dt>{t(locale, "issue_detail.action")}</dt><dd>{action}</dd></div>}
+        {verification && <div><dt>{t(locale, "issue_detail.verification")}</dt><dd>{verification}</dd></div>}
+        {issue.case_id && <div><dt>{t(locale, "issue_detail.case")}</dt><dd>{issue.case_id}</dd></div>}
+      </dl>
+      {issue.id && requestable
+        ? <button className="issue-treatment-command" onClick={onTreat}><Stethoscope size={16} />{t(locale, "issue_detail.treat")}</button>
+        : <p className="issue-treatment-unavailable">{t(locale, "issue_detail.not_requestable")}</p>}
+    </section>
   );
 }
 
@@ -256,6 +381,58 @@ function ProjectionNotice({ locale }: { locale: Locale }) {
   );
 }
 
+function LaboratoryRelation({
+  locale,
+  direction,
+  onSelect,
+}: {
+  locale: Locale;
+  direction: "to-laboratory" | "to-evolution";
+  onSelect: () => void;
+}) {
+  const toLaboratory = direction === "to-laboratory";
+  return (
+    <section className="laboratory-relation" aria-label={t(locale, "lab.relationship")}>
+      <span className="laboratory-relation-mark"><GitBranch size={14} /></span>
+      <div>
+        <small>{t(locale, "lab.group_label")}</small>
+        <strong>{t(locale, "lab.relationship")}</strong>
+        <p>{t(locale, toLaboratory ? "lab.relationship_from_evolution" : "lab.relationship_from_facility")}</p>
+      </div>
+      <button onClick={onSelect}>
+        {toLaboratory ? <FlaskConical size={15} /> : <Sparkles size={15} />}
+        {t(locale, toLaboratory ? "lab.open" : "lab.open_evolution")}
+      </button>
+    </section>
+  );
+}
+
+function LaboratoryPanel({
+  locale,
+  onSelectEvolution,
+  onClose,
+}: {
+  locale: Locale;
+  onSelectEvolution: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="detail-panel laboratory-detail" aria-label={t(locale, "aria.laboratory_details")}>
+      <div className="detail-heading">
+        <div className="module-title laboratory-title">
+          <FlaskConical size={20} />
+          <div><span className="eyebrow">{t(locale, "lab.facility_kind")}</span><h2>{t(locale, "lab.title")}</h2></div>
+        </div>
+        <button className="icon-button" onClick={onClose} aria-label={t(locale, "common.close")}><X size={16} /></button>
+      </div>
+      <p className="laboratory-projection-notice"><ShieldCheck size={14} />{t(locale, "lab.ui_boundary")}</p>
+      <p className="detail-summary">{t(locale, "lab.facility_summary")}</p>
+      <LaboratoryRelation locale={locale} direction="to-evolution" onSelect={onSelectEvolution} />
+      <EvolutionLab locale={locale} showHeader={false} />
+    </aside>
+  );
+}
+
 function PublicSourcePaths({ paths, locale }: { paths: string[]; locale: Locale }) {
   const visible = paths.slice(0, 8);
   return (
@@ -279,11 +456,14 @@ function DetailPanel({
   structureNavigation,
   connections,
   activity,
+  moduleIssues,
+  observationCurrent,
   locale,
   onEnterSeed,
   onEnterStructure,
   onTreatCard,
-  onTreatModule,
+  onTreatIssue,
+  onOpenLaboratory,
   onSelectModule,
   onSelectStructure,
   onLeaveStructure,
@@ -296,19 +476,37 @@ function DetailPanel({
   structureNavigation: StructureNavigationState;
   connections: CanopyConnection[];
   activity?: ActivityProjection;
+  moduleIssues: CanopyIssue[];
+  observationCurrent: boolean;
   locale: Locale;
   onEnterSeed: () => void;
   onEnterStructure: (nodeId: string) => void;
   onTreatCard: (card: SeedCard) => void;
-  onTreatModule: (module: ModuleHealth) => void;
+  onTreatIssue: (issue: CanopyIssue) => void;
+  onOpenLaboratory: () => void;
   onSelectModule: (moduleId: string) => void;
   onSelectStructure: (nodeId: string) => void;
   onLeaveStructure: () => void;
   onClose: () => void;
 }) {
+  const panelRef = useRef<HTMLElement>(null);
+  const detailIdentity = card
+    ? `card:${card.id}`
+    : structureNode
+      ? `structure:${structureNode.id}`
+      : module
+        ? `module:${module.id}`
+        : "empty";
+  useEffect(() => {
+    // Navigation controls can sit near the bottom of a long detail panel.
+    // Reusing that scroll position for the next node can hide its heading and
+    // make the newly selected structure appear empty.
+    if (panelRef.current) panelRef.current.scrollTop = 0;
+  }, [detailIdentity]);
+
   if (card) {
     return (
-      <aside className="detail-panel" aria-label={t(locale, "aria.card_details")}>
+      <aside ref={panelRef} className="detail-panel" aria-label={t(locale, "aria.card_details")}>
         <div className="detail-heading">
           <div>
             <span className="eyebrow">SEED MEMORY</span>
@@ -342,6 +540,7 @@ function DetailPanel({
     const publicSourcePaths = derivePublicSourcePaths(structureNodes, structureNode.id);
     return (
       <aside
+        ref={panelRef}
         className="detail-panel"
         aria-label={t(locale, "aria.structure_details")}
         data-navigation-depth={structureNavigation.depth}
@@ -356,13 +555,15 @@ function DetailPanel({
         </div>
         <ProjectionNotice locale={locale} />
         <p className="detail-summary">{structureNode.summary || t(locale, "common.no_summary")}</p>
+        {structureNode.module_id === "evolution" && (
+          <LaboratoryRelation locale={locale} direction="to-laboratory" onSelect={onOpenLaboratory} />
+        )}
         <dl className="detail-facts">
           {structureNode.path && <div><dt>{t(locale, "structure.path")}</dt><dd><code className="structure-path">{structureNode.path}</code></dd></div>}
           <div><dt>{t(locale, "structure.children")}</dt><dd>{t(locale, "structure.child_count", { count: structureNode.child_count })}</dd></div>
           {structureNode.size_bytes > 0 && <div><dt>{t(locale, "structure.size")}</dt><dd>{structureNode.size_bytes.toLocaleString(locale)} B</dd></div>}
         </dl>
         <PublicSourcePaths paths={publicSourcePaths} locale={locale} />
-        {structureNode.module_id === "evolution" && <EvolutionLab locale={locale} />}
         {children.length > 0 && (
           <section className="structure-relations">
             <h3>{t(locale, "structure.children")}</h3>
@@ -396,8 +597,9 @@ function DetailPanel({
   const activityIds = new Set(activity?.modules[module.id]?.event_ids ?? []);
   const recentActivity = activity?.events.filter((event) => activityIds.has(event.id)).slice(0, 5) ?? [];
   const publicSourcePaths = derivePublicSourcePaths(structureNodes, `module:${module.id}`);
+  const needsTreatment = module.health.status === "attention" || module.health.status === "critical";
   return (
-    <aside className="detail-panel" aria-label={t(locale, "aria.module_details")}>
+    <aside ref={panelRef} className="detail-panel" aria-label={t(locale, "aria.module_details")}>
       <div className="detail-heading">
         <div className="module-title">
           <Icon size={20} />
@@ -407,6 +609,9 @@ function DetailPanel({
       </div>
       <ProjectionNotice locale={locale} />
       <p className="detail-summary">{moduleSummary(locale, module)}</p>
+      {module.id === "evolution" && (
+        <LaboratoryRelation locale={locale} direction="to-laboratory" onSelect={onOpenLaboratory} />
+      )}
       <div className="vital-grid">
         <div><span>{t(locale, "metric.health")}</span><strong>{t(locale, `status.${module.health.status}`)}</strong></div>
         <div><span>{t(locale, "metric.activity")}</span><strong>{localizedDimension(locale, module.activity.label, "activity")}</strong></div>
@@ -419,7 +624,6 @@ function DetailPanel({
         ))}
       </dl>
       <PublicSourcePaths paths={publicSourcePaths} locale={locale} />
-      {module.id === "evolution" && <EvolutionLab locale={locale} />}
       <section className="recent-activity">
         <h3>{t(locale, "activity.recent")}</h3>
         {recentActivity.length ? recentActivity.map((event) => (
@@ -437,7 +641,24 @@ function DetailPanel({
       {structureNavigation.scope === "overview" && structureNavigation.selectedNode && structureNavigation.children.length > 0 && (
         <button className="secondary-command" onClick={() => onEnterStructure(structureNavigation.selectedNode!.id)}><FolderTree size={18} />{t(locale, "structure.enter")}</button>
       )}
-      <button className="secondary-command" onClick={() => onTreatModule(module)}><Stethoscope size={18} />{t(locale, "module.propose_change")}</button>
+      {needsTreatment && <section className="module-treatment-block" data-testid="module-treatment-block" aria-label={t(locale, "module.treatment_title")}>
+        <header><span><Stethoscope size={16} /><strong>{t(locale, "module.treatment_title")}</strong></span>{moduleIssues.length > 0 && <small>{t(locale, "module.treatment_count", { count: moduleIssues.length })}</small>}</header>
+        {!observationCurrent ? (
+          <p className="module-treatment-unavailable">{t(locale, "module.treatment_stale")}</p>
+        ) : moduleIssues.length ? moduleIssues.map((issue) => {
+          const requestable = issue.remediation?.requestable === true;
+          return (
+            <article key={issue.id || issue.title} className="module-treatment-issue" data-issue-id={issue.id || ""} data-requestable={requestable ? "true" : "false"}>
+              <div><StatusPill status={issue.severity} locale={locale} /><strong>{localizedIssueTitle(locale, issue)}</strong></div>
+              <p>{localizedIssueDetail(locale, issue)}</p>
+              {issue.evidence?.length ? <small>{issue.evidence[0]}</small> : null}
+              {requestable ? (
+                <button className="issue-treatment-command" data-issue-id={issue.id || ""} onClick={() => onTreatIssue(issue)}><Stethoscope size={16} />{t(locale, "module.start_treatment")}</button>
+              ) : <span className="module-treatment-read-only">{t(locale, "module.treatment_read_only")}</span>}
+            </article>
+          );
+        }) : <p className="module-treatment-unavailable">{t(locale, "module.treatment_unmapped")}</p>}
+      </section>}
     </aside>
   );
 }
@@ -614,12 +835,18 @@ function SettingsPanel({
         </div>
         <div className="settings-group">
         <span>{t(locale, "settings.music")}</span>
-        <div className="settings-segments music-options" data-testid="music-settings">
-          {MUSIC_TRACKS.map((value) => (
-            <button key={value} className={musicTrack === value ? "is-active" : ""} aria-pressed={musicTrack === value} onClick={() => onMusic(value)}>
-              {t(locale, `music.${value}`)}
-            </button>
-          ))}
+        <div className="music-select-wrap">
+          <select
+            className="music-select"
+            data-testid="music-settings"
+            aria-label={t(locale, "settings.music")}
+            value={musicTrack}
+            onChange={(event) => onMusic(event.currentTarget.value as AmbientTrackId)}
+          >
+            {MUSIC_TRACKS.map((value) => (
+              <option key={value} value={value}>{t(locale, `music.${value}`)}</option>
+            ))}
+          </select>
         </div>
         <label className="volume-control">
           <span>{t(locale, "settings.music_volume")}</span>
@@ -736,6 +963,25 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [audioError, setAudioError] = useState("");
   const [snapshot, setSnapshot] = useState<CanopySnapshot | null>(null);
+  const [snapshotSync, setSnapshotSync] = useState<SnapshotSyncState>({
+    status: "starting",
+    last_synced_at: "",
+    last_error: "",
+    changed: false,
+    observation_state: "no_data",
+    projection_state: "unavailable",
+    using_last_verified: false,
+    contract: { status: "unavailable", schema_version: 0, source_mode: "", module_count: 0 },
+    topology: {
+      status: "unavailable",
+      fingerprint: "",
+      contract_id: "",
+      schema_version: 0,
+      module_count: 0,
+      connection_count: 0,
+      structure_node_count: 0,
+    },
+  });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -747,6 +993,8 @@ export default function App() {
   const [focusRevision, setFocusRevision] = useState(0);
   const [detailOpen, setDetailOpen] = useState(false);
   const [compactHud, setCompactHud] = useState({ left: false, bottom: false });
+  const [selectedIssueKey, setSelectedIssueKey] = useState("");
+  const [treatmentIssue, setTreatmentIssue] = useState<CanopyIssue | null>(null);
   const [treatment, setTreatment] = useState<PendingTreatment | null>(null);
   const [selectedActivityDate, setSelectedActivityDate] = useState("");
   const [activityPlaying, setActivityPlaying] = useState(false);
@@ -762,8 +1010,12 @@ export default function App() {
     last_error: "",
     accepted: 0,
     persisted: 0,
+    truncated: false,
+    omitted: {},
   });
   const bgm = useRef<AmbientBgm | null>(null);
+  const lifeRevision = useRef("");
+  const snapshotGeneratedAt = useRef("");
 
   useEffect(() => {
     document.documentElement.lang = locale;
@@ -867,42 +1119,60 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    async function syncLifeEvents(refresh = false) {
+    let inFlight = false;
+    const controller = new AbortController();
+    async function readLifeEvents(forceFull = false) {
+      if (inFlight) return;
+      inFlight = true;
       try {
-        const payload = await fetchLifeEvents(refresh);
+        if (!forceFull && lifeRevision.current) {
+          const revision = await fetchLifeEventRevision(controller.signal);
+          if (cancelled) return;
+          setLifeSync((current) => lifeSyncDisplayRevision(current) === lifeSyncDisplayRevision(revision.sync) ? current : revision.sync);
+          if (revision.stats.revision === lifeRevision.current) return;
+        }
+        const payload = await fetchLifeEvents(lifeStreamOpen ? 140 : 80, controller.signal);
         if (cancelled) return;
+        const revision = eventPayloadRevision(payload.events, payload.stats);
+        if (revision === lifeRevision.current) return;
+        lifeRevision.current = revision;
         setLifeEvents(payload.events);
         setLifeStats(payload.stats);
         setLifeRetentionDays(payload.retention_days);
         setLifeSync(payload.sync);
       } catch (reason) {
-        if (cancelled) return;
+        if (cancelled || (reason instanceof DOMException && reason.name === "AbortError")) return;
         setLifeSync((current) => ({
           ...current,
           status: "degraded",
           last_error: reason instanceof Error ? reason.message : "Life event sync unavailable",
         }));
+      } finally {
+        inFlight = false;
       }
     }
-    // The backend owns automatic ingestion. Read its persisted projection on
-    // mount so one page does not launch a second full Core scan at startup.
-    void syncLifeEvents(false);
+    // The backend owns ingestion. An open panel updates promptly; a folded
+    // panel uses a small, slower projection. Unchanged revisions never update
+    // React state, so the 3D scene is not reconciled for an idle poll.
+    void readLifeEvents(true);
     const timer = window.setInterval(() => {
-      if (!document.hidden) void syncLifeEvents(false);
-    }, 3500);
+      if (!document.hidden) void readLifeEvents(false);
+    }, lifeStreamOpen ? 10_000 : 30_000);
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearInterval(timer);
     };
-  }, []);
+  }, [lifeStreamOpen]);
 
   async function load(refresh = false) {
     refresh ? setRefreshing(true) : setLoading(true);
     setError("");
     try {
-      const next = await fetchSnapshot(refresh);
-      setSnapshot(next);
-      setLifeEvents((current) => current.length ? current : next.activity?.events ?? []);
+      const result = await fetchSnapshot(refresh);
+      setSnapshot(result.snapshot);
+      setSnapshotSync(result.sync);
+      setLifeEvents((current) => current.length ? current : result.snapshot.activity?.events ?? []);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "fatal.title"));
     } finally {
@@ -912,6 +1182,10 @@ export default function App() {
   }
 
   useEffect(() => { void load(); }, []);
+
+  useEffect(() => {
+    snapshotGeneratedAt.current = snapshot?.generated_at ?? "";
+  }, [snapshot?.generated_at]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -927,20 +1201,33 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
+    const controller = new AbortController();
     const readPersistedProjection = async () => {
-      if (document.hidden) return;
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       try {
-        const next = await fetchSnapshot(false);
+        const revision = await fetchSnapshotRevision(controller.signal);
         if (cancelled) return;
-        setSnapshot((current) => current?.generated_at === next.generated_at ? current : next);
-      } catch {
+        setSnapshotSync((current) => snapshotSyncDisplayRevision(current) === snapshotSyncDisplayRevision(revision.sync) ? current : revision.sync);
+        if (!revision.generated_at || revision.generated_at === snapshotGeneratedAt.current) return;
+        const result = await fetchSnapshot(false);
+        if (cancelled) return;
+        setSnapshot((current) => current?.generated_at === result.snapshot.generated_at ? current : result.snapshot);
+        snapshotGeneratedAt.current = result.snapshot.generated_at;
+        setSnapshotSync((current) => snapshotSyncDisplayRevision(current) === snapshotSyncDisplayRevision(result.sync) ? current : result.sync);
+      } catch (reason) {
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
         // The visible last-known-good projection remains usable while the
         // backend retries. Manual sync surfaces a concrete error when needed.
+      } finally {
+        inFlight = false;
       }
     };
     const timer = window.setInterval(() => { void readPersistedProjection(); }, 30_000);
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearInterval(timer);
     };
   }, []);
@@ -952,11 +1239,14 @@ export default function App() {
     try {
       const result = await syncSnapshot();
       setSnapshot(result.snapshot);
+      setSnapshotSync(result.sync);
       setLifeEvents((current) => current.length ? current : result.snapshot.activity?.events ?? []);
-      setSyncNotice(t(locale, "sync.completed", {
-        modules: result.sync.topology.module_count,
-        connections: result.sync.topology.connection_count,
-      }));
+      setSyncNotice(result.sync.observation_state === "observed"
+        ? t(locale, "sync.completed", {
+          modules: result.sync.topology.module_count,
+          connections: result.sync.topology.connection_count,
+        })
+        : "");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "fatal.title"));
     } finally {
@@ -981,10 +1271,54 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [activityPlaying, snapshot?.activity]);
 
-  const connections = snapshot?.connections ?? [];
+  const observationCurrent = snapshotSync.observation_state === "observed"
+    && snapshotSync.projection_state === "current";
+  const selectedIssueIndex = snapshot?.issues.findIndex(
+    (issue, index) => issueIdentity(issue, index) === selectedIssueKey,
+  ) ?? -1;
+  const selectedIssue = selectedIssueIndex >= 0 ? snapshot?.issues[selectedIssueIndex] : undefined;
+  const selectAdjacentIssue = (offset: number) => {
+    if (!snapshot?.issues.length || selectedIssueIndex < 0) return;
+    const nextIndex = (selectedIssueIndex + offset + snapshot.issues.length) % snapshot.issues.length;
+    setSelectedIssueKey(issueIdentity(snapshot.issues[nextIndex], nextIndex));
+  };
+  useEffect(() => {
+    if (!observationCurrent || (selectedIssueKey && !selectedIssue)) setSelectedIssueKey("");
+  }, [observationCurrent, selectedIssue, selectedIssueKey]);
+  const displayModules = useMemo(
+    () => observationCurrent || !snapshot
+      ? snapshot?.modules ?? []
+      : snapshot.modules.map((module) => ({
+        ...module,
+        health: { ...module.health, status: "unknown" as HealthStatus },
+      })),
+    [observationCurrent, snapshot],
+  );
+  const displayCards = useMemo(
+    () => observationCurrent || !snapshot
+      ? snapshot?.seed_memory.cards ?? []
+      : snapshot.seed_memory.cards.map((card) => ({
+        ...card,
+        health: { ...card.health, status: "unknown" as HealthStatus },
+      })),
+    [observationCurrent, snapshot],
+  );
+  const connections = useMemo(
+    () => observationCurrent || !snapshot
+      ? snapshot?.connections ?? []
+      : snapshot.connections.map((connection) => ({
+        ...connection,
+        health: { ...connection.health, status: "unknown" as HealthStatus },
+        signal: { ...connection.signal, state: "unavailable", strength: 0 },
+      })),
+    [observationCurrent, snapshot],
+  );
   const structureNodes = snapshot?.structure?.nodes ?? [];
-  const selectedModule = snapshot?.modules.find((module) => module.id === selectedModuleId);
-  const selectedCard = snapshot?.seed_memory.cards.find((card) => card.id === selectedCardId);
+  const selectedModule = displayModules.find((module) => module.id === selectedModuleId);
+  const selectedModuleIssues = selectedModule && observationCurrent
+    ? snapshot?.issues.filter((issue) => issue.module_ids?.includes(selectedModule.id)) ?? []
+    : [];
+  const selectedCard = displayCards.find((card) => card.id === selectedCardId);
   const selectedStructureNode = structureNodes.find((node) => node.id === selectedStructureId);
   const structureNavigation = useMemo(
     () => deriveStructureNavigationState(structureNodes, view, selectedStructureId, selectedModuleId),
@@ -1001,7 +1335,7 @@ export default function App() {
   const selectedActivityIndex = activityDays.findIndex((day) => day.date === selectedActivityDate);
   const growthProgress = activityDays.length
     ? Math.max(0.72, (selectedActivityIndex + 1) / activityDays.length)
-    : 1;
+    : 0;
 
   function enterSeed() {
     setView("seed");
@@ -1042,6 +1376,16 @@ export default function App() {
     setLifeStreamOpen(false);
   }
 
+  function openLaboratory() {
+    if (!displayModules.some((module) => module.id === "evolution")) return;
+    setView("laboratory");
+    setSelectedModuleId("");
+    setSelectedCardId("");
+    setFocusRevision((value) => value + 1);
+    setDetailOpen(true);
+    setLifeStreamOpen(false);
+  }
+
   function focusLifeEventModule(moduleId: string) {
     setView("overview");
     setSelectedModuleId(moduleId);
@@ -1070,14 +1414,6 @@ export default function App() {
       target: { type: "seed_card", id: "new-seed-card", title: t(locale, "treatment.create_title") },
       intents: ["create", "diagnose"],
       initialIntent: "create",
-    });
-  }
-
-  function proposeModuleChange(module: ModuleHealth) {
-    setTreatment({
-      target: { type: "module", id: module.id, title: moduleName(locale, module.id, module.name), summary: moduleSummary(locale, module) },
-      intents: ["diagnose", "update"],
-      initialIntent: "diagnose",
     });
   }
 
@@ -1129,6 +1465,7 @@ export default function App() {
       data-settings={settingsOpen ? "open" : "closed"}
       data-life-stream={lifeStreamOpen ? "open" : "closed"}
       data-detail={detailOpen ? "open" : "closed"}
+      data-issue={selectedIssue ? "open" : "closed"}
       data-effects={visualEffects.master ? "on" : "off"}
       data-effect-distance={effectDistance}
       data-effect-particles={appliedVisualEffects.master && appliedVisualEffects.particles ? "on" : "off"}
@@ -1138,19 +1475,26 @@ export default function App() {
       data-effect-motion={appliedVisualEffects.master && appliedVisualEffects.motion ? "on" : "off"}
       data-effect-particles-preference={visualEffects.particles ? "on" : "off"}
       data-effect-clouds-preference={visualEffects.clouds ? "on" : "off"}
+      data-observation-state={snapshotSync.observation_state}
+      data-projection-state={snapshotSync.projection_state}
       lang={locale}
     >
       <div
         className="scene-stage"
         aria-label={t(locale, "aria.scene")}
+        aria-keyshortcuts="ArrowLeft ArrowRight"
+        tabIndex={0}
+        onPointerDown={(event) => {
+          if (event.target instanceof HTMLCanvasElement) event.currentTarget.focus({ preventScroll: true });
+        }}
         data-architecture-connections={connections.length}
         data-world-tree={backgroundMode === "none" ? "none" : backgroundMode}
         data-ancient-ruins={backgroundMode === "detailed" ? "visible" : "hidden"}
       >
         <CanopyScene
-          modules={snapshot.modules}
+          modules={displayModules}
           connections={connections}
-          cards={snapshot.seed_memory.cards}
+          cards={displayCards}
           structure={snapshot.structure}
           locale={locale}
           backgroundMode={backgroundMode}
@@ -1165,8 +1509,12 @@ export default function App() {
           onSelectModule={focusModule}
           onSelectCard={(cardId) => { setSelectedCardId(cardId); setDetailOpen(true); }}
           onSelectStructure={enterStructure}
+          onSelectLaboratory={openLaboratory}
           onSceneInteraction={() => {
-            setDetailOpen(false);
+            // Structure navigation is a focused inspection flow. Keep its
+            // selected node visible while overview facilities and living-unit
+            // panels may yield to deliberate camera movement.
+            if (view !== "structure") setDetailOpen(false);
             setLifeStreamOpen(false);
           }}
           onEffectDistanceChange={setEffectDistance}
@@ -1177,7 +1525,24 @@ export default function App() {
         <div className="brand-lockup"><TreePine size={22} /><div><strong>CANOPY</strong><span>{t(locale, "brand.subtitle")}</span></div></div>
       </header>
 
-      {view === "overview" && (
+      {!observationCurrent && (
+        <div className="observation-banner" role="alert" data-state={snapshotSync.observation_state}>
+          <CircleHelp size={16} />
+          <span>
+            <strong>{t(locale, snapshotSync.observation_state === "contract_invalid"
+              ? "observation.contract_invalid_title"
+              : "observation.no_data_title")}</strong>
+            {t(locale, snapshotSync.using_last_verified
+              ? "observation.last_verified_detail"
+              : snapshotSync.observation_state === "contract_invalid"
+                ? "observation.contract_invalid_detail"
+                : "observation.no_data_detail")}
+            {snapshotSync.last_error && <small>{snapshotSync.last_error}</small>}
+          </span>
+        </div>
+      )}
+
+      {(view === "overview" || view === "laboratory") && (
         <div className="topology-projection-badge" role="note">
           <GitBranch size={13} />
           <span><strong>{t(locale, "topology.projection_title")}</strong>{t(locale, "topology.projection_note")}</span>
@@ -1216,12 +1581,12 @@ export default function App() {
         />
       )}
 
-      {view === "seed" && <SeedNavigator cards={snapshot.seed_memory.cards} selectedId={selectedCardId} locale={locale} onSelect={(cardId) => { setSelectedCardId(cardId); setDetailOpen(true); }} onCreate={proposeNewCard} />}
+      {view === "seed" && <SeedNavigator cards={displayCards} selectedId={selectedCardId} locale={locale} onSelect={(cardId) => { setSelectedCardId(cardId); setDetailOpen(true); }} onCreate={proposeNewCard} />}
       {view === "structure" && <StructureBreadcrumb nodes={structureNodes} selectedId={selectedStructureId} locale={locale} onSelect={enterStructure} />}
       {view === "timeline" && snapshot.activity && (
         <ActivityTimeline
           activity={snapshot.activity}
-          modules={snapshot.modules}
+          modules={displayModules}
           locale={locale}
           selectedDate={selectedActivityDate}
           playing={activityPlaying}
@@ -1232,7 +1597,7 @@ export default function App() {
       )}
 
       <LifeStreamPanel
-        events={lifeEvents.length ? lifeEvents : snapshot.activity?.events ?? []}
+        events={lifeSync.status === "starting" && !lifeEvents.length ? snapshot.activity?.events ?? [] : lifeEvents}
         sync={lifeSync}
         stats={lifeStats}
         retentionDays={lifeRetentionDays}
@@ -1250,7 +1615,15 @@ export default function App() {
         }}
       />
 
-      {detailOpen && <DetailPanel
+      {detailOpen && view === "laboratory" && (
+        <LaboratoryPanel
+          locale={locale}
+          onSelectEvolution={() => focusModule("evolution")}
+          onClose={() => setDetailOpen(false)}
+        />
+      )}
+
+      {detailOpen && view !== "laboratory" && <DetailPanel
         module={view === "overview" || view === "timeline" ? selectedModule : undefined}
         card={view === "seed" ? selectedCard : undefined}
         structureNode={view === "structure" ? selectedStructureNode : undefined}
@@ -1258,30 +1631,51 @@ export default function App() {
         structureNavigation={structureNavigation}
         connections={connections}
         activity={snapshot.activity}
+        moduleIssues={selectedModuleIssues}
+        observationCurrent={observationCurrent}
         locale={locale}
         onEnterSeed={enterSeed}
         onEnterStructure={enterStructure}
         onTreatCard={proposeCardChange}
-        onTreatModule={proposeModuleChange}
+        onTreatIssue={(issue) => setTreatmentIssue(issue)}
+        onOpenLaboratory={openLaboratory}
         onSelectModule={(moduleId) => { setView("overview"); focusModule(moduleId); }}
         onSelectStructure={enterStructure}
         onLeaveStructure={leaveDepthView}
         onClose={() => setDetailOpen(false)}
       />}
 
+      {selectedIssue && <IssueInspector
+        issue={selectedIssue}
+        locale={locale}
+        position={selectedIssueIndex}
+        count={snapshot.issues.length}
+        onPrevious={() => selectAdjacentIssue(-1)}
+        onNext={() => selectAdjacentIssue(1)}
+        onTreat={() => setTreatmentIssue(selectedIssue)}
+        onClose={() => setSelectedIssueKey("")}
+      />}
+
       <footer className="bottom-hud" data-compact={compactHud.bottom ? "true" : "false"}>
         <button className="hud-density-toggle bottom-density-toggle" aria-label={t(locale, compactHud.bottom ? "hud.expand" : "hud.compact")} title={t(locale, compactHud.bottom ? "hud.expand" : "hud.compact")} onClick={() => toggleHud("bottom")}>{compactHud.bottom ? <Maximize2 size={15} /> : <Minimize2 size={15} />}</button>
         <button className="depth-back" disabled={view === "overview"} onClick={leaveDepthView}><ArrowLeft size={17} />{view === "structure" && structureNavigation.parentNode ? t(locale, "structure.back") : view === "seed" ? t(locale, "footer.back_greenhouse") : t(locale, "footer.overview")}</button>
         <div className="signal-strip">
-          {snapshot.issues.length ? snapshot.issues.slice(0, 3).map((issue, index) => (
-            <span key={`${issue.title}-${index}`}><i data-status={issue.severity} />{localizedIssueTitle(locale, issue)}</span>
+          {!observationCurrent ? (
+            <span><i data-status="unknown" />{t(locale, snapshotSync.observation_state === "contract_invalid" ? "observation.contract_invalid_title" : "observation.no_data_title")}</span>
+          ) : snapshot.issues.length ? snapshot.issues.slice(0, 3).map((issue, index) => (
+            <button
+              className="signal-item"
+              key={issueIdentity(issue, index)}
+              aria-expanded={selectedIssueKey === issueIdentity(issue, index)}
+              onClick={() => setSelectedIssueKey((current) => current === issueIdentity(issue, index) ? "" : issueIdentity(issue, index))}
+            ><i data-status={issue.severity} />{localizedIssueTitle(locale, issue)}</button>
           )) : <span><i data-status="healthy" />{t(locale, "footer.no_major_issue")}</span>}
         </div>
-        <div className="bottom-compact-summary"><i data-status={snapshot.issues[0]?.severity ?? "healthy"} /><strong>{t(locale, "footer.issue_count", { count: snapshot.issues.length })}</strong></div>
+        <button className="bottom-compact-summary" disabled={!observationCurrent || !snapshot.issues.length} onClick={() => snapshot.issues[0] && setSelectedIssueKey(issueIdentity(snapshot.issues[0], 0))}><i data-status={observationCurrent ? snapshot.issues[0]?.severity ?? "healthy" : "unknown"} /><strong>{observationCurrent ? t(locale, "footer.issue_count", { count: snapshot.issues.length }) : t(locale, "footer.data_unavailable")}</strong></button>
         <div className="global-vitals bottom-vitals">
-          <StatusPill status={snapshot.overall.status} locale={locale} />
-          <span><small>{t(locale, "metric.structural")}</small><strong>{snapshot.overall.scores.structural ?? "-"}</strong></span>
-          <span><small>{t(locale, "metric.behavioral")}</small><strong>{snapshot.overall.scores.behavioral ?? "-"}</strong></span>
+          <StatusPill status={observationCurrent ? snapshot.overall.status : "unknown"} locale={locale} />
+          <span><small>{t(locale, "metric.structural")}</small><strong>{observationCurrent ? snapshot.overall.scores.structural ?? "-" : "-"}</strong></span>
+          <span><small>{t(locale, "metric.behavioral")}</small><strong>{observationCurrent ? snapshot.overall.scores.behavioral ?? "-" : "-"}</strong></span>
         </div>
         <time dateTime={snapshot.generated_at}>{new Date(snapshot.generated_at).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}</time>
       </footer>
@@ -1293,6 +1687,7 @@ export default function App() {
       {syncNotice && <div className="toast-sync" role="status">{syncNotice}</div>}
       {(error || audioError) && <div className="toast-error">{audioError || error}</div>}
       {treatment && <TreatmentComposer target={treatment.target} intents={treatment.intents} initialIntent={treatment.initialIntent} locale={locale} onClose={() => setTreatment(null)} />}
+      {treatmentIssue && <IssueTreatmentPanel issue={treatmentIssue} locale={locale} onClose={() => setTreatmentIssue(null)} />}
       <span className="sr-only" data-testid="architecture-count">{connections.length}</span>
     </main>
   );

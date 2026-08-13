@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Beaker, FlaskConical, Microscope, ShieldCheck } from "lucide-react";
+import { Beaker, FlaskConical, GitBranch, Microscope, ShieldCheck } from "lucide-react";
 import { fetchEvolutionLab } from "../api";
 import { t, type Locale } from "../i18n";
 import type { EvolutionLabResponse, EvolutionLabWorkflowStep } from "../types";
@@ -89,7 +89,7 @@ function findingNarrative(
   return translated === messageKey ? fallback || t(locale, "common.no_summary") : translated;
 }
 
-export function EvolutionLab({ locale }: { locale: Locale }) {
+export function EvolutionLab({ locale, showHeader = true }: { locale: Locale; showHeader?: boolean }) {
   const [lab, setLab] = useState<EvolutionLabResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState(false);
@@ -131,11 +131,12 @@ export function EvolutionLab({ locale }: { locale: Locale }) {
 
   return (
     <section className="evolution-lab" aria-label={t(locale, "lab.title")} data-status={unavailable ? "unavailable" : lab?.status ?? "loading"}>
-      <header>
+      {showHeader && <header>
         <span><FlaskConical size={17} /></span>
         <div><small>{t(locale, "lab.eyebrow")}</small><h3>{t(locale, "lab.title")}</h3></div>
-      </header>
+      </header>}
       <p className="lab-boundary"><ShieldCheck size={14} />{t(locale, "lab.boundary")}</p>
+      <p className="lab-runtime-link"><GitBranch size={14} />{t(locale, "lab.runtime_link")}</p>
 
       {loading ? (
         <p className="lab-unavailable"><Microscope size={17} />{t(locale, "lab.loading")}</p>

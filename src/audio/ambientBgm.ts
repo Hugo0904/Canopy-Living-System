@@ -6,6 +6,11 @@ export type AmbientTrackId =
   | "sunlit-piano"
   | "sacred-grove"
   | "sakuya4"
+  | "hanagoyomi2"
+  | "moonlit-overture"
+  | "poema"
+  | "deep-woods5"
+  | "otogi3"
   | "shrine-ritual"
   | "ancient-temple";
 
@@ -84,6 +89,56 @@ export const AMBIENT_TRACKS: Record<AmbientTrackId, AmbientTrackInfo> = {
     licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
     sourceUrl: "https://peritune.com/blog/2018/12/21/sakuya4/",
     playbackGain: 0.5,
+  },
+  hanagoyomi2: {
+    id: "hanagoyomi2",
+    url: "/assets/audio/tracks/hanagoyomi2.mp3",
+    title: "Hanagoyomi2",
+    artist: "PeriTune · Sei Mutsuki",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://peritune.com/blog/2021/03/29/hanagoyomi2/",
+    playbackGain: 0.72,
+  },
+  "moonlit-overture": {
+    id: "moonlit-overture",
+    url: "/assets/audio/tracks/moonlit-overture.mp3",
+    title: "Moonlit Overture",
+    artist: "PeriTune · Sei Mutsuki",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://peritune.com/blog/2024/01/09/moonlit_overture/",
+    playbackGain: 0.5,
+  },
+  poema: {
+    id: "poema",
+    url: "/assets/audio/tracks/poema.mp3",
+    title: "Poema",
+    artist: "PeriTune · Sei Mutsuki",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://peritune.com/blog/2020/01/04/poema/",
+    playbackGain: 0.55,
+  },
+  "deep-woods5": {
+    id: "deep-woods5",
+    url: "/assets/audio/tracks/deep-woods5.mp3",
+    title: "Deep Woods5",
+    artist: "PeriTune · Sei Mutsuki",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://peritune.com/blog/2021/10/05/deep_woods5/",
+    playbackGain: 0.5,
+  },
+  otogi3: {
+    id: "otogi3",
+    url: "/assets/audio/tracks/otogi3.mp3",
+    title: "Otogi3",
+    artist: "PeriTune · Sei Mutsuki",
+    license: "CC BY 4.0",
+    licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
+    sourceUrl: "https://peritune.com/blog/2019/11/01/otogi3/",
+    playbackGain: 0.42,
   },
   "shrine-ritual": {
     id: "shrine-ritual",
@@ -244,7 +299,9 @@ export class AmbientBgm {
 
 let uiContext: AudioContext | null = null;
 const DEFAULT_UI_VOLUME = 0.72;
-const MAX_UI_GAIN = 0.08;
+// Keep one click below digital full scale while giving the short 90 ms cue
+// enough presence beside the scene audio. This is 4x the original 0.08 peak.
+const MAX_UI_GAIN = 0.32;
 
 export function playUiClick(volume = DEFAULT_UI_VOLUME): void {
   const AudioContextClass = window.AudioContext

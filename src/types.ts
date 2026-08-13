@@ -11,11 +11,16 @@ export interface ModuleHealth {
   name: string;
   zone: string;
   summary: string;
-  health: StatusDimension & { status: HealthStatus };
+  health: StatusDimension & {
+    status: HealthStatus;
+    reason_code?: string;
+    evidence_state?: string;
+  };
   activity: StatusDimension;
   impact: StatusDimension;
   confidence: { level: string; label: string };
   metrics: Record<string, string | number | boolean | null | undefined>;
+  issue_ids?: string[];
 }
 
 export interface ActivityEvent {
@@ -39,6 +44,45 @@ export interface ActivityEvent {
   assistance: string;
   request_effect: string;
   verification: string;
+}
+
+export type LifeStoryInterventionKind =
+  | "role_selected"
+  | "prior_context"
+  | "evolution_review"
+  | "memory_applied"
+  | "memory_reviewed";
+
+export interface LifeStoryIntervention {
+  kind: LifeStoryInterventionKind;
+  value: string;
+  summary: string;
+}
+
+export interface LifeStoryLearningEvidence {
+  mode: "learned" | "candidate" | "applied" | "reviewed" | "reviewing" | "resolved" | "incomplete" | "none";
+  stage: string;
+  summary: string;
+  next_benefit: string;
+  evidence_kind: string;
+}
+
+export interface LifeStory {
+  id: string;
+  correlation_id: string;
+  occurred_at: string;
+  module_id: string;
+  phase: string;
+  status: string;
+  summary: string;
+  outcome: string;
+  primary_kind: string;
+  facts: Record<string, string>;
+  interventions: LifeStoryIntervention[];
+  verifications: Array<{ kind: string; text: string }>;
+  learning: LifeStoryLearningEvidence;
+  evolution_requested: boolean;
+  steps: ActivityEvent[];
 }
 
 export interface ActivityDay {
@@ -81,7 +125,7 @@ export interface LifeEventsResponse {
   schema_version: number;
   contract_id: string;
   events: ActivityEvent[];
-  stats: { total: number; oldest: string; newest: string };
+  stats: { total: number; oldest: string; newest: string; revision?: string };
   retention_days: number;
   sync: {
     status: "starting" | "live" | "degraded" | string;
@@ -90,7 +134,23 @@ export interface LifeEventsResponse {
     accepted: number;
     persisted: number;
     coverage?: Record<string, unknown>;
+    truncated?: boolean;
+    omitted?: Record<string, unknown>;
   };
+}
+
+export interface LifeEventsRevisionResponse {
+  schema_version: number;
+  contract_id: string;
+  stats: LifeEventsResponse["stats"];
+  sync: LifeEventsResponse["sync"];
+}
+
+export interface SnapshotRevisionResponse {
+  schema_version: number;
+  contract_id: string;
+  generated_at: string;
+  sync: SnapshotSyncState;
 }
 
 export interface SeedCard {
@@ -112,11 +172,163 @@ export interface SeedCard {
 }
 
 export interface CanopyIssue {
+  id?: string;
+  source?: string;
+  state?: string;
+  owner?: string;
+  impact?: string;
+  evidence_state?: string;
+  requires_operator?: boolean;
+  case_id?: string;
+  last_seen_at?: string;
+  next_review_at?: string;
   severity: HealthStatus;
   code?: string;
   params?: Record<string, string | number | boolean>;
   title: string;
   detail: string;
+  module_ids?: string[];
+  evidence?: string[];
+  source_refs?: string[];
+  remediation?: {
+    mode?: string;
+    state?: string;
+    action_id?: string;
+    authority?: string;
+    automatic?: boolean;
+    requestable?: boolean;
+    summary?: string;
+    next_action?: string;
+    command?: string;
+    verification?: string;
+    rollback?: string;
+  };
+  verification?: {
+    status?: string;
+    summary?: string;
+    verified_at?: string;
+  } | string;
+}
+
+export type RemediationMode = "embedded" | "handoff";
+
+export interface RemediationModelCapability {
+  model: string;
+  display_name: string;
+  efforts: string[];
+  default_effort?: string | null;
+  is_default: boolean;
+}
+
+export interface RemediationCapabilities {
+  status: string;
+  available: boolean;
+  models: RemediationModelCapability[];
+  error_code?: string | null;
+  error?: string | null;
+}
+
+export interface RemediationDiagnosis {
+  summary?: string;
+  root_cause?: string;
+  evidence?: string[];
+  recommended_action?: string;
+  affected_scope?: string[];
+  risk?: "low" | "medium" | "high" | string;
+  verification_plan?: string[];
+  requires_operator_input?: boolean;
+  operator_question?: string | null;
+  engineering_verdict?: "PASS" | "REVISE" | "OBSERVE" | "REJECT" | string;
+  invariant_results?: Record<string, string>;
+  review_risks?: string[];
+  review_rationale?: string;
+}
+
+export interface RemediationArtifact {
+  artifact_type?: string;
+  verdict?: string;
+  invariant_results?: Record<string, string>;
+  risks?: string[];
+  rationale?: string;
+  [key: string]: unknown;
+}
+
+export interface RemediationRecord {
+  id: string;
+  contract_id?: string;
+  contract_version?: string;
+  finding_id: string;
+  finding_fingerprint?: string;
+  origin?: string;
+  mode?: string;
+  stage: string;
+  case_id?: string;
+  proposal_id?: string;
+  proposal_hash?: string;
+  requested_model?: string;
+  requested_reasoning_effort?: string;
+  applied_model?: string;
+  applied_reasoning_effort?: string;
+  finding?: {
+    id?: string;
+    owner?: string;
+    summary?: string;
+    evidence?: string[];
+    source_refs?: string[];
+    remediation?: Record<string, string>;
+  };
+  diagnosis?: RemediationDiagnosis;
+  artifacts?: Record<string, RemediationArtifact>;
+  authorization?: {
+    id?: string;
+    decision?: string;
+    authority?: string;
+    proposal_hash?: string;
+    decided_at?: string;
+  };
+  execution?: {
+    status?: string;
+    model?: string;
+    effort?: string;
+    output?: {
+      summary?: string;
+      changed_paths?: string[];
+      verification_evidence?: string[];
+      remaining_risks?: string[];
+    };
+    error?: string | null;
+  };
+  verification?: {
+    outcome?: "resolved" | "still_open" | "issue_changed" | "unavailable" | string;
+    summary?: string;
+    verified_at?: string;
+  };
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RemediationResponse {
+  status: string;
+  request?: RemediationRecord;
+  provider?: {
+    status?: string;
+    model?: string | null;
+    effort?: string | null;
+    error_code?: string | null;
+    error?: string | null;
+  };
+  verification_error?: string;
+}
+
+export interface RemediationHandoff {
+  status: string;
+  request_id: string;
+  stage?: string;
+  cli: {
+    inspect: string;
+    continue: string;
+  };
+  desktop_prompt: string;
 }
 
 export interface CanopyConnection {
@@ -235,6 +447,15 @@ export interface SnapshotSyncState {
   last_synced_at: string;
   last_error: string;
   changed: boolean;
+  observation_state: "observed" | "no_data" | "contract_invalid";
+  projection_state: "current" | "last_known_good" | "unavailable";
+  using_last_verified: boolean;
+  contract: {
+    status: "valid" | "unavailable" | string;
+    schema_version: number;
+    source_mode: string;
+    module_count: number;
+  };
   topology: TopologySyncReport;
 }
 
@@ -338,7 +559,7 @@ export interface TreatmentRequest {
 }
 
 export interface TreatmentTarget {
-  type: "seed_card" | "module" | "agent" | "receipt" | "log";
+  type: "seed_card" | "agent" | "receipt" | "log";
   id: string;
   title: string;
   summary?: string;

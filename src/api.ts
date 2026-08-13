@@ -1,4 +1,16 @@
-import type { CanopySnapshot, EvolutionLabResponse, LifeEventsResponse, SyncSnapshotResponse, TreatmentRequest } from "./types";
+import type {
+  EvolutionLabResponse,
+  LifeEventsResponse,
+  LifeEventsRevisionResponse,
+  RemediationCapabilities,
+  RemediationHandoff,
+  RemediationMode,
+  RemediationRecord,
+  RemediationResponse,
+  SnapshotRevisionResponse,
+  SyncSnapshotResponse,
+  TreatmentRequest,
+} from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -6,30 +18,89 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(payload.detail || `${response.status} ${response.statusText}`);
+    const payload = (await response.json().catch(() => ({}))) as {
+      detail?: string | { message?: string; code?: string };
+    };
+    const detail = typeof payload.detail === "string"
+      ? payload.detail
+      : payload.detail?.message;
+    throw new Error(detail || `${response.status} ${response.statusText}`);
   }
   return (await response.json()) as T;
 }
 
-export function fetchSnapshot(refresh = false): Promise<CanopySnapshot> {
-  return request(`/api/snapshot${refresh ? "?refresh=true" : ""}`);
+export function fetchSnapshot(refresh = false): Promise<SyncSnapshotResponse> {
+  return refresh ? syncSnapshot() : request("/api/snapshot");
+}
+
+export function fetchSnapshotRevision(signal?: AbortSignal): Promise<SnapshotRevisionResponse> {
+  return request("/api/snapshot/revision", { signal });
 }
 
 export function syncSnapshot(): Promise<SyncSnapshotResponse> {
   return request("/api/sync", { method: "POST" });
 }
 
-export function fetchLifeEvents(refresh = false, limit = 220): Promise<LifeEventsResponse> {
+export function fetchLifeEvents(limit = 140, signal?: AbortSignal): Promise<LifeEventsResponse> {
   const parameters = new URLSearchParams({
     limit: String(limit),
-    refresh: refresh ? "true" : "false",
   });
-  return request(`/api/life-events?${parameters.toString()}`);
+  return request(`/api/life-events?${parameters.toString()}`, { signal });
+}
+
+export function fetchLifeEventRevision(signal?: AbortSignal): Promise<LifeEventsRevisionResponse> {
+  return request("/api/life-events/revision", { signal });
 }
 
 export function fetchEvolutionLab(): Promise<EvolutionLabResponse> {
   return request("/api/evolution-lab");
+}
+
+export function fetchRemediationCapabilities(): Promise<RemediationCapabilities> {
+  return request("/api/remediations/capabilities");
+}
+
+export function openIssueRemediation(input: {
+  issue_id: string;
+  mode: RemediationMode;
+  model?: string;
+  reasoning_effort?: string;
+}): Promise<RemediationRecord> {
+  return request("/api/remediations", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchRemediation(remediationId: string): Promise<RemediationRecord> {
+  return request(`/api/remediations/${encodeURIComponent(remediationId)}`);
+}
+
+export function diagnoseRemediation(remediationId: string): Promise<RemediationResponse> {
+  return request(`/api/remediations/${encodeURIComponent(remediationId)}/diagnose`, {
+    method: "POST",
+  });
+}
+
+export function authorizeRemediation(
+  remediationId: string,
+  decision: "operator_approved" | "operator_rejected",
+  proposalHash: string,
+): Promise<RemediationRecord> {
+  return request(`/api/remediations/${encodeURIComponent(remediationId)}/authorize`, {
+    method: "POST",
+    body: JSON.stringify({ decision, proposal_hash: proposalHash }),
+  });
+}
+
+export function runRemediation(remediationId: string): Promise<RemediationResponse> {
+  return request(`/api/remediations/${encodeURIComponent(remediationId)}/run`, {
+    method: "POST",
+  });
+}
+
+export function fetchRemediationHandoff(remediationId: string): Promise<RemediationHandoff> {
+  return request(`/api/remediations/${encodeURIComponent(remediationId)}/handoff`);
 }
 
 export function createTreatment(input: {

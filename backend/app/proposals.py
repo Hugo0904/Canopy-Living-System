@@ -30,6 +30,10 @@ def build_treatment_proposal(
         raise ValueError("operator_prompt must contain at least 4 characters")
     if len(prompt) > 2000:
         raise ValueError("operator_prompt exceeds 2000 characters")
+    if target_type == "module":
+        raise ValueError(
+            "living-unit treatment must use a Core-issued remediation finding"
+        )
 
     before: dict[str, Any] | None = None
     request_type = "TreatmentRequest"

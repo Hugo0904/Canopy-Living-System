@@ -1,9 +1,10 @@
 # Music sources and licenses
 
 Canopy Living System hosts complete local tracks so playback does not depend on a
-third-party streaming service. Website copies are encoded as 44.1 kHz stereo
-MP3 at 192 kbps and target -13 LUFS with a -1.2 dB true-peak ceiling before
-lossy encoding.
+third-party streaming service. The player keeps credited source MP3 masters
+without another lossy transcode. Because source mastering levels differ, the
+track metadata applies a non-destructive playback trim where needed; the local
+files remain unchanged.
 
 ## Active BGM tracks
 
@@ -26,6 +27,57 @@ lossy encoding.
   - License: Creative Commons Attribution 4.0 International
   - License: https://creativecommons.org/licenses/by/4.0/
   - Attribution: `"Sakuya4" PeriTune / Sei Mutsuki`
+
+- `tracks/hanagoyomi2.mp3`
+  - "Hanagoyomi2" by PeriTune / Sei Mutsuki
+  - Source: https://peritune.com/blog/2021/03/29/hanagoyomi2/
+  - Source MP3 SHA-256: `96232ab1e58a611a9d8d8e12ed7f86d2252b0552a67c5c326ce7c06f9fd0c769`
+  - Original 192 kbps MP3, included without musical or mastering changes.
+  - Player trim: `0.72`
+  - License: Creative Commons Attribution 4.0 International
+  - License: https://creativecommons.org/licenses/by/4.0/
+  - Attribution: `"Hanagoyomi2" PeriTune / Sei Mutsuki`
+
+- `tracks/moonlit-overture.mp3`
+  - "Moonlit Overture" by PeriTune / Sei Mutsuki
+  - Source: https://peritune.com/blog/2024/01/09/moonlit_overture/
+  - Source MP3 SHA-256: `19d5559fae6c6747c930f11c233a9b6c087ce6d0fb5925ad560f9504c9a8c167`
+  - Original 192 kbps MP3, included without musical or mastering changes.
+  - Player trim: `0.5`
+  - License: Creative Commons Attribution 4.0 International
+  - License: https://creativecommons.org/licenses/by/4.0/
+  - Attribution: `"Moonlit Overture" PeriTune / Sei Mutsuki`
+
+- `tracks/poema.mp3`
+  - "Poema" by PeriTune / Sei Mutsuki
+  - Source: https://peritune.com/blog/2020/01/04/poema/
+  - Source MP3 SHA-256: `a80135972ab978a05520f8f92069f69a8e317f6c194a7a66a016aaa3476565fe`
+  - Original 192 kbps MP3, included without musical or mastering changes.
+  - Player trim: `0.55`
+  - License: Creative Commons Attribution 4.0 International
+  - License: https://creativecommons.org/licenses/by/4.0/
+  - Attribution: `"Poema" PeriTune / Sei Mutsuki`
+
+- `tracks/deep-woods5.mp3`
+  - "Deep Woods5" by PeriTune / Sei Mutsuki
+  - Source: https://peritune.com/blog/2021/10/05/deep_woods5/
+  - Source MP3 SHA-256: `087a4d2803187d8e64e1d3c46504b1250e82a36276acfc47868d7fb2dc0fb7f5`
+  - Original complete 192 kbps MP3; loop and melody-off variants are not used.
+  - Player trim: `0.5`
+  - License: Creative Commons Attribution 4.0 International
+  - License: https://creativecommons.org/licenses/by/4.0/
+  - Attribution: `"Deep Woods5" PeriTune / Sei Mutsuki`
+
+- `tracks/otogi3.mp3`
+  - "Otogi3" by PeriTune / Sei Mutsuki
+  - Source: https://peritune.com/blog/2019/11/01/otogi3/
+  - Source MP3 SHA-256: `e8eff534d4022f92ffb8964faf73f684ec13366c147bb46dcbdabd068d64fac0`
+  - Original 192 kbps MP3, included without musical or mastering changes.
+  - Player trim: `0.42`
+  - License: Creative Commons Attribution 4.0 International
+  - License: https://creativecommons.org/licenses/by/4.0/
+  - Attribution: `"Otogi3" PeriTune / Sei Mutsuki`
+
 - `tracks/shrine-ritual.mp3`
   - "Ritual" by brainiac256
   - Source: https://opengameart.org/content/ritual

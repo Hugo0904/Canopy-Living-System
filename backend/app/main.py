@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .canopy_adapter import CanopyAdapter
 from .database import ObservatoryDatabase
 from .proposals import build_treatment_proposal
+from .remediation_adapter import (
+    RemediationAdapter,
+    RemediationAdapterError,
+    RemediationContractError,
+    RemediationUnavailable,
+)
 from .settings import Settings
+from .snapshot_contract import SnapshotContractError, validate_normalized_snapshot
 from .topology import TopologyContractError, validate_snapshot_topology
 
 
@@ -29,18 +37,32 @@ database = ObservatoryDatabase(
     life_event_max_records=settings.life_event_max_records,
 )
 adapter = CanopyAdapter(settings.canopy_root, cache_seconds=settings.snapshot_cache_seconds)
+remediation_adapter = RemediationAdapter(settings)
 life_sync_state: dict[str, Any] = {
     "status": "starting",
     "last_synced_at": "",
     "last_error": "",
     "accepted": 0,
     "persisted": 0,
+    "truncated": False,
+    "omitted": {},
 }
+life_sync_lock = asyncio.Lock()
+snapshot_sync_lock = asyncio.Lock()
 snapshot_sync_state: dict[str, Any] = {
     "status": "starting",
     "last_synced_at": "",
     "last_error": "",
     "changed": False,
+    "observation_state": "no_data",
+    "projection_state": "unavailable",
+    "using_last_verified": False,
+    "contract": {
+        "status": "unavailable",
+        "schema_version": 0,
+        "source_mode": "",
+        "module_count": 0,
+    },
     "topology": {
         "status": "unavailable",
         "fingerprint": "",
@@ -51,10 +73,43 @@ snapshot_sync_state: dict[str, Any] = {
         "structure_node_count": 0,
     },
 }
+STARTUP_SNAPSHOT_DELAY_SECONDS = 5
+
+
+def _validate_snapshot(snapshot: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    contract = validate_normalized_snapshot(snapshot)
+    topology = validate_snapshot_topology(snapshot)
+    if topology["status"] != "valid":
+        raise TopologyContractError(
+            "Canopy public snapshot does not contain a verified topology contract"
+        )
+    return contract, topology
+
+
+def _latest_verified_snapshot() -> dict[str, Any] | None:
+    snapshot = database.latest_snapshot()
+    if snapshot is None:
+        return None
+    try:
+        _validate_snapshot(snapshot)
+    except (SnapshotContractError, TopologyContractError):
+        return None
+    return snapshot
 
 
 def initialize_runtime() -> None:
     database.initialize()
+    latest = _latest_verified_snapshot()
+    if latest is not None:
+        contract, topology = _validate_snapshot(latest)
+        snapshot_sync_state.update(
+            {
+                "projection_state": "last_known_good",
+                "using_last_verified": True,
+                "contract": contract,
+                "topology": topology,
+            }
+        )
 
 
 def _incremental_since(cursor: str) -> str:
@@ -71,31 +126,47 @@ def _incremental_since(cursor: str) -> str:
     )
 
 
-async def sync_life_events() -> dict[str, Any]:
-    cursor = await asyncio.to_thread(database.life_event_cursor)
-    activity, warning = await asyncio.to_thread(
-        adapter.collect_activity,
-        since=_incremental_since(cursor),
-        days=settings.life_event_retention_days,
-        max_events=500,
-    )
-    result = await asyncio.to_thread(database.import_life_events, activity)
-    life_sync_state.update(
-        {
-            "status": "degraded" if warning else "live",
-            "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "last_error": warning,
-            **result,
-            "coverage": activity.get("coverage", {}),
-        }
-    )
-    return dict(life_sync_state)
+async def sync_life_events(*, full_scan: bool = False) -> dict[str, Any]:
+    async with life_sync_lock:
+        cursor = "" if full_scan else await asyncio.to_thread(database.life_event_cursor)
+        activity, warning = await asyncio.to_thread(
+            adapter.collect_activity,
+            since=_incremental_since(cursor),
+            days=settings.life_event_retention_days,
+            max_events=500,
+        )
+        result = await asyncio.to_thread(database.import_life_events, activity)
+        coverage = activity.get("coverage", {})
+        current_omitted = activity.get("omitted", {})
+        current_truncated = bool(activity.get("truncated", False))
+        truncated = current_truncated if full_scan else bool(life_sync_state.get("truncated")) or current_truncated
+        omitted = current_omitted if current_truncated or full_scan else life_sync_state.get("omitted", {})
+        life_sync_state.update(
+            {
+                "status": "degraded" if warning else "live",
+                "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "last_error": warning,
+                **result,
+                "coverage": coverage,
+                "truncated": truncated,
+                "omitted": omitted,
+            }
+        )
+        return dict(life_sync_state)
 
 
 async def life_event_sync_loop() -> None:
+    delay = settings.life_event_sync_seconds
+    first_scan = True
     while True:
         try:
-            await sync_life_events()
+            result = await sync_life_events(full_scan=first_scan)
+            first_scan = False
+            delay = (
+                settings.life_event_sync_seconds
+                if result.get("changed", 0)
+                else min(30, max(settings.life_event_sync_seconds, int(delay * 1.5)))
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - degraded UI must not stop the service.
@@ -106,48 +177,53 @@ async def life_event_sync_loop() -> None:
                     "last_error": str(exc)[:300],
                 }
             )
-        await asyncio.sleep(settings.life_event_sync_seconds)
+        await asyncio.sleep(delay)
 
 
 async def sync_snapshot() -> dict[str, Any]:
-    try:
-        snapshot = await asyncio.to_thread(adapter.collect, refresh=True)
-        topology = validate_snapshot_topology(snapshot)
-        latest = await asyncio.to_thread(database.latest_snapshot)
-        if topology["status"] == "unavailable" and latest is not None:
-            latest_topology = validate_snapshot_topology(latest)
-            if latest_topology["status"] == "valid":
-                raise TopologyContractError(
-                    "Canopy public topology is temporarily unavailable; retained the last verified projection"
-                )
-        changed = await asyncio.to_thread(database.save_snapshot, snapshot)
-        snapshot_sync_state.update(
-            {
-                "status": "live",
-                "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "last_error": "",
-                "changed": changed,
-                "topology": topology,
-            }
-        )
-        return snapshot
-    except Exception as exc:  # noqa: BLE001 - persisted snapshot remains available.
-        snapshot_sync_state.update(
-            {
-                "status": "degraded",
-                "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "last_error": str(exc)[:300],
-            }
-        )
-        raise
+    async with snapshot_sync_lock:
+        try:
+            snapshot = await asyncio.to_thread(adapter.collect, refresh=True)
+            contract, topology = _validate_snapshot(snapshot)
+            changed = await asyncio.to_thread(database.save_snapshot, snapshot)
+            snapshot_sync_state.update(
+                {
+                    "status": "live",
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "last_error": "",
+                    "changed": changed,
+                    "observation_state": "observed",
+                    "projection_state": "current",
+                    "using_last_verified": False,
+                    "contract": contract,
+                    "topology": topology,
+                }
+            )
+            return snapshot
+        except Exception as exc:  # noqa: BLE001 - persisted snapshot remains available.
+            latest = await asyncio.to_thread(_latest_verified_snapshot)
+            snapshot_sync_state.update(
+                {
+                    "status": "degraded",
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "last_error": str(exc)[:300],
+                    "changed": False,
+                    "observation_state": "contract_invalid",
+                    "projection_state": "last_known_good" if latest is not None else "unavailable",
+                    "using_last_verified": latest is not None,
+                }
+            )
+            raise
 
 
 async def snapshot_sync_loop() -> None:
-    # A persisted snapshot lets the UI become interactive immediately. Avoid
-    # competing with the first page load by deferring the heavier Core scan;
-    # a fresh installation (with no snapshot yet) still collects at once.
-    if await asyncio.to_thread(database.latest_snapshot) is not None:
-        await asyncio.sleep(settings.snapshot_sync_seconds)
+    # A persisted snapshot lets the UI become interactive immediately. Give
+    # startup a short head start, then refresh automatically instead of making
+    # the operator wait for the full recurring interval or press Sync.
+    if await asyncio.to_thread(_latest_verified_snapshot) is not None:
+        await asyncio.sleep(
+            min(STARTUP_SNAPSHOT_DELAY_SECONDS, settings.snapshot_sync_seconds)
+        )
     while True:
         try:
             await sync_snapshot()
@@ -156,6 +232,22 @@ async def snapshot_sync_loop() -> None:
         except Exception:
             pass
         await asyncio.sleep(settings.snapshot_sync_seconds)
+
+
+async def snapshot_projection(*, refresh: bool = False) -> dict[str, Any]:
+    if not refresh:
+        persisted = await asyncio.to_thread(_latest_verified_snapshot)
+        if persisted is not None:
+            return {"snapshot": persisted, "sync": dict(snapshot_sync_state)}
+    try:
+        snapshot = await sync_snapshot()
+        return {"snapshot": snapshot, "sync": dict(snapshot_sync_state)}
+    except Exception as exc:  # noqa: BLE001 - a verified projection is a safe fallback.
+        persisted = await asyncio.to_thread(_latest_verified_snapshot)
+        if persisted is not None:
+            return {"snapshot": persisted, "sync": dict(snapshot_sync_state)}
+        status_code = 409 if isinstance(exc, (SnapshotContractError, TopologyContractError)) else 503
+        raise HTTPException(status_code=status_code, detail=str(exc)[:300]) from exc
 
 
 @asynccontextmanager
@@ -180,20 +272,81 @@ app = FastAPI(
 )
 
 
+def _local_origin_allowed(origin: str) -> bool:
+    if not origin:
+        return True
+    from urllib.parse import urlparse
+
+    parsed = urlparse(origin)
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+@app.middleware("http")
+async def local_origin_guard(request: Request, call_next):
+    if request.url.path.startswith("/api/") and not _local_origin_allowed(request.headers.get("origin", "")):
+        return JSONResponse(status_code=403, content={"detail": "Cross-origin localhost requests are not allowed"})
+    return await call_next(request)
+
+
 class TreatmentInput(BaseModel):
-    target_type: str = Field(pattern="^(seed_card|module|agent|receipt|log)$")
+    target_type: str = Field(pattern="^(seed_card|agent|receipt|log)$")
     target_id: str = Field(min_length=1, max_length=240)
     intent: str = Field(pattern="^(create|update|merge|archive|diagnose)$")
     operator_prompt: str = Field(min_length=4, max_length=2000)
 
 
+class RemediationOpenInput(BaseModel):
+    """Living System surface request for one Core-owned remediation."""
+
+    issue_id: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$",
+    )
+    mode: Literal["embedded", "handoff"] = "embedded"
+    model: str | None = Field(default=None, min_length=1, max_length=100)
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=40)
+
+
+class RemediationAuthorizationInput(BaseModel):
+    """Explicit operator decision bound to the exact Core proposal hash."""
+
+    decision: Literal["operator_approved", "operator_rejected"]
+    proposal_hash: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+
+
+async def _call_remediation(
+    method: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Keep blocking Core CLI work off the event loop and preserve typed failures."""
+
+    try:
+        return await asyncio.to_thread(method, *args, **kwargs)
+    except RemediationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=exc.as_dict()) from exc
+    except RemediationContractError as exc:
+        raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
+    except RemediationAdapterError as exc:
+        raise HTTPException(status_code=500, detail=exc.as_dict()) from exc
+
+
 @app.get("/api/health")
 async def api_health() -> dict[str, Any]:
+    snapshot_current = (
+        snapshot_sync_state["status"] == "live"
+        and snapshot_sync_state["observation_state"] == "observed"
+        and snapshot_sync_state["projection_state"] == "current"
+    )
     return {
-        "status": "healthy",
+        "status": "healthy" if snapshot_current else "degraded",
         "service": "canopy-living-system",
-        "canopy_root": str(settings.canopy_root),
-        "database": str(settings.database_path),
+        "canopy_instance": hashlib.sha256(
+            str(settings.canopy_root).encode("utf-8")
+        ).hexdigest()[:16],
+        "canopy_connected": settings.canopy_root.is_dir(),
+        "database_ready": settings.database_path.is_file(),
         "retention": {
             "snapshots_days": settings.snapshot_retention_days,
             "snapshots_max": settings.snapshot_max_records,
@@ -210,25 +363,25 @@ async def api_health() -> dict[str, Any]:
 
 
 @app.get("/api/snapshot")
-async def api_snapshot(refresh: bool = Query(default=False)) -> dict[str, Any]:
-    if not refresh:
-        persisted = await asyncio.to_thread(database.latest_snapshot)
-        if persisted is not None:
-            return persisted
-    try:
-        return await sync_snapshot()
-    except TopologyContractError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+async def api_snapshot() -> dict[str, Any]:
+    return await snapshot_projection()
+
+
+@app.get("/api/snapshot/revision")
+async def api_snapshot_revision() -> dict[str, Any]:
+    snapshot = await asyncio.to_thread(_latest_verified_snapshot)
+    return {
+        "schema_version": 1,
+        "contract_id": "canopy.living-system.snapshot-revision",
+        "generated_at": str((snapshot or {}).get("generated_at", "")),
+        "sync": dict(snapshot_sync_state),
+    }
 
 
 @app.post("/api/sync")
 async def api_sync() -> dict[str, Any]:
     """Rebuild the local projection through the same path as automatic sync."""
-    try:
-        snapshot = await sync_snapshot()
-    except TopologyContractError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"snapshot": snapshot, "sync": dict(snapshot_sync_state)}
+    return await snapshot_projection(refresh=True)
 
 
 @app.get("/api/cards")
@@ -237,7 +390,7 @@ async def api_cards(
     category: str = Query(default=""),
     search: str = Query(default="", max_length=120),
 ) -> dict[str, Any]:
-    snapshot = await asyncio.to_thread(adapter.collect)
+    snapshot = (await snapshot_projection())["snapshot"]
     cards = list((snapshot.get("seed_memory") or {}).get("cards", []))
     search_text = search.strip().lower()
     if lifecycle:
@@ -263,7 +416,7 @@ async def api_cards(
 
 @app.get("/api/cards/{card_id:path}")
 async def api_card(card_id: str) -> dict[str, Any]:
-    snapshot = await asyncio.to_thread(adapter.collect)
+    snapshot = (await snapshot_projection())["snapshot"]
     for card in (snapshot.get("seed_memory") or {}).get("cards", []):
         if card.get("id") == card_id:
             return card
@@ -277,11 +430,8 @@ async def api_history(limit: int = Query(default=30, ge=1, le=100)) -> dict[str,
 
 @app.get("/api/life-events")
 async def api_life_events(
-    limit: int = Query(default=160, ge=1, le=500),
-    refresh: bool = Query(default=False),
+    limit: int = Query(default=140, ge=1, le=500),
 ) -> dict[str, Any]:
-    if refresh:
-        await sync_life_events()
     events, stats = await asyncio.gather(
         asyncio.to_thread(database.list_life_events, limit),
         asyncio.to_thread(database.life_event_stats),
@@ -296,15 +446,107 @@ async def api_life_events(
     }
 
 
+@app.get("/api/life-events/revision")
+async def api_life_events_revision() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "contract_id": "canopy.living-system.life-events-revision",
+        "stats": await asyncio.to_thread(database.life_event_stats),
+        "sync": dict(life_sync_state),
+    }
+
+
 @app.get("/api/evolution-lab")
 async def api_evolution_lab() -> dict[str, Any]:
     """Run the bounded public Evolution checks only when the laboratory is opened."""
     return await asyncio.to_thread(adapter.collect_evolution_lab)
 
 
+@app.get("/api/remediations/capabilities")
+async def api_remediation_capabilities() -> dict[str, Any]:
+    """Expose Core-discovered models and reasoning efforts without a UI catalog."""
+
+    return await _call_remediation(remediation_adapter.capabilities)
+
+
+@app.post("/api/remediations")
+async def api_open_remediation(payload: RemediationOpenInput) -> dict[str, Any]:
+    """Open or reuse the canonical Core remediation for one public issue."""
+
+    snapshot = (await snapshot_projection())["snapshot"]
+    issue = next(
+        (
+            item
+            for item in snapshot.get("issues", [])
+            if isinstance(item, dict) and item.get("id") == payload.issue_id
+        ),
+        None,
+    )
+    if issue is None:
+        raise HTTPException(
+            status_code=404,
+            detail="The requested finding is not in the current public Canopy snapshot",
+        )
+    remediation = issue.get("remediation")
+    if not isinstance(remediation, dict) or remediation.get("requestable") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="Canopy Core has not marked this finding as requestable",
+        )
+
+    return await _call_remediation(
+        remediation_adapter.open,
+        payload.issue_id,
+        origin="living_system",
+        mode=payload.mode,
+        model=payload.model or "",
+        effort=payload.reasoning_effort or "",
+    )
+
+
+@app.get("/api/remediations")
+async def api_remediations(
+    limit: int = Query(default=30, ge=1, le=100),
+) -> dict[str, Any]:
+    return await _call_remediation(remediation_adapter.list, limit)
+
+
+@app.get("/api/remediations/{remediation_id}")
+async def api_remediation_status(remediation_id: str) -> dict[str, Any]:
+    return await _call_remediation(remediation_adapter.status, remediation_id)
+
+
+@app.post("/api/remediations/{remediation_id}/diagnose")
+async def api_diagnose_remediation(remediation_id: str) -> dict[str, Any]:
+    return await _call_remediation(remediation_adapter.diagnose, remediation_id)
+
+
+@app.post("/api/remediations/{remediation_id}/authorize")
+async def api_authorize_remediation(
+    remediation_id: str,
+    payload: RemediationAuthorizationInput,
+) -> dict[str, Any]:
+    return await _call_remediation(
+        remediation_adapter.authorize,
+        remediation_id,
+        payload.decision,
+        payload.proposal_hash,
+    )
+
+
+@app.post("/api/remediations/{remediation_id}/run")
+async def api_run_remediation(remediation_id: str) -> dict[str, Any]:
+    return await _call_remediation(remediation_adapter.run, remediation_id)
+
+
+@app.get("/api/remediations/{remediation_id}/handoff")
+async def api_remediation_handoff(remediation_id: str) -> dict[str, Any]:
+    return await _call_remediation(remediation_adapter.handoff, remediation_id)
+
+
 @app.post("/api/treatments")
 async def api_create_treatment(payload: TreatmentInput) -> dict[str, Any]:
-    snapshot = await asyncio.to_thread(adapter.collect)
+    snapshot = (await snapshot_projection())["snapshot"]
     try:
         request_type, proposal = build_treatment_proposal(
             snapshot=snapshot,

@@ -97,9 +97,9 @@ class Settings:
             ),
             snapshot_max_records=bounded_int(
                 "CANOPY_LIVING_SYSTEM_SNAPSHOT_MAX",
-                500,
+                9000,
                 30,
-                5000,
+                20000,
                 "CANOPY_OBSERVATORY_SNAPSHOT_MAX",
             ),
             treatment_retention_days=bounded_int(
@@ -123,6 +123,6 @@ class Settings:
                 "CANOPY_LIVING_SYSTEM_EVENT_MAX", 5000, 200, 20000
             ),
             life_event_sync_seconds=bounded_int(
-                "CANOPY_LIVING_SYSTEM_SYNC_SECONDS", 4, 2, 60
+                "CANOPY_LIVING_SYSTEM_SYNC_SECONDS", 12, 4, 60
             ),
         )

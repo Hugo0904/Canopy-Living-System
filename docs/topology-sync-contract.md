@@ -35,6 +35,39 @@ what changed.
 5. Invalid or temporarily unavailable topology is rejected. The previous
    verified projection remains visible and Canopy continues normally.
 
+## Snapshot truth states
+
+The Living System consumes only `canopy observe snapshot --json`. It does not
+reparse Seed Health JSON, private cards, policy files, or mutable runtime state
+when that command fails.
+
+`GET /api/snapshot` and `POST /api/sync` return the same envelope:
+
+```json
+{
+  "snapshot": {},
+  "sync": {
+    "observation_state": "observed | no_data | contract_invalid",
+    "projection_state": "current | last_known_good | unavailable",
+    "using_last_verified": false
+  }
+}
+```
+
+- `observed` means the normalized schema and complete topology both passed.
+  An explicitly published numeric zero remains zero.
+- `no_data` means no current collection has completed. A verified persisted
+  projection may remain visible, but its health colors are suppressed.
+- `contract_invalid` means collection, normalized schema, or required topology
+  validation failed. It never replaces the previous verified SQLite row and is
+  never presented as healthy.
+- A required metric key that is absent makes the snapshot `contract_invalid`;
+  a present metric with a null value is shown as **data unavailable**. Neither
+  case becomes numeric zero.
+- Optional provider evidence may degrade through an explicit public issue. A
+  required missing path must fail the provider contract instead of becoming an
+  empty array or a healthy module.
+
 ## Provider checklist for a new Canopy capability
 
 When a feature becomes a new top-level living unit rather than an internal file:

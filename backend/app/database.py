@@ -34,12 +34,14 @@ class ObservatoryDatabase:
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        compact_released_pages = False
         with self.connect() as connection:
             connection.executescript(
                 """
@@ -110,6 +112,66 @@ class ObservatoryDatabase:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?)",
                     (self._now(),),
                 )
+            snapshot_summary_migration = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 4"
+            ).fetchone()
+            if snapshot_summary_migration is None:
+                latest = connection.execute(
+                    "SELECT id FROM snapshots ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                latest_id = int(latest["id"]) if latest else 0
+                rows = connection.execute(
+                    "SELECT id, payload_json FROM snapshots WHERE id != ?",
+                    (latest_id,),
+                ).fetchall()
+                for row in rows:
+                    try:
+                        payload = json.loads(row["payload_json"])
+                    except (TypeError, json.JSONDecodeError):
+                        payload = {}
+                    connection.execute(
+                        "UPDATE snapshots SET payload_json = ? WHERE id = ?",
+                        (
+                            json.dumps(
+                                self._snapshot_history_payload(payload),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            row["id"],
+                        ),
+                    )
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)",
+                    (self._now(),),
+                )
+            storage_compaction_migration = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 5"
+            ).fetchone()
+            if storage_compaction_migration is None:
+                page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+                free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+                compact_released_pages = (
+                    self.path.stat().st_size >= 16 * 1024 * 1024
+                    and page_count > 0
+                    and free_pages / page_count >= 0.5
+                )
+                if not compact_released_pages:
+                    connection.execute(
+                        "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)",
+                        (self._now(),),
+                    )
+        if compact_released_pages:
+            # v4 first reduces old full snapshots to small summaries. A single
+            # offline-style VACUUM then returns the now-unused pages to disk;
+            # it never runs during ordinary sync and is safe to retry if the
+            # process exits before the migration receipt is written.
+            with self.connect() as connection:
+                connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                connection.execute("VACUUM")
+                connection.execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(5, ?)",
+                    (self._now(),),
+                )
 
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -166,6 +228,20 @@ class ObservatoryDatabase:
             (self.life_event_max_records,),
         )
 
+    def _snapshot_history_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        overall = payload.get("overall") if isinstance(payload.get("overall"), dict) else {}
+        return {
+            "history_summary": True,
+            "schema_version": payload.get("schema_version"),
+            "generated_at": payload.get("generated_at", ""),
+            "source_mode": payload.get("source_mode", ""),
+            "overall": {
+                "status": overall.get("status", "unknown"),
+                "summary": overall.get("summary", ""),
+                "scores": overall.get("scores", {}),
+            },
+        }
+
     def save_snapshot(self, payload: dict[str, Any]) -> bool:
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         stable_payload = {
@@ -178,10 +254,26 @@ class ObservatoryDatabase:
         with self._lock, self.connect() as connection:
             self._prune_snapshots(connection)
             latest = connection.execute(
-                "SELECT payload_hash FROM snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT id, payload_hash, payload_json FROM snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
             if latest and latest["payload_hash"] == payload_hash:
                 return False
+            if latest:
+                try:
+                    latest_payload = json.loads(latest["payload_json"])
+                except (TypeError, json.JSONDecodeError):
+                    latest_payload = {}
+                connection.execute(
+                    "UPDATE snapshots SET payload_json = ? WHERE id = ?",
+                    (
+                        json.dumps(
+                            self._snapshot_history_payload(latest_payload),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        latest["id"],
+                    ),
+                )
             connection.execute(
                 """
                 INSERT INTO snapshots(captured_at, payload_hash, overall_status, payload_json)
@@ -301,6 +393,7 @@ class ObservatoryDatabase:
         raw_events = activity.get("events")
         events = raw_events if isinstance(raw_events, list) else []
         accepted = 0
+        changed = 0
         now = self._now()
         with self._lock, self.connect() as connection:
             for event in events:
@@ -320,7 +413,7 @@ class ObservatoryDatabase:
                     "status": str(event.get("status", "observed")),
                     "growth_stage": str(event.get("growth_stage", "")),
                 }
-                connection.execute(
+                write = connection.execute(
                     """
                     INSERT INTO life_events(
                         id, occurred_at, correlation_id, module_id, phase,
@@ -335,6 +428,7 @@ class ObservatoryDatabase:
                         growth_stage=excluded.growth_stage,
                         payload_json=excluded.payload_json,
                         updated_at=excluded.updated_at
+                    WHERE life_events.payload_json != excluded.payload_json
                     """,
                     (
                         event_id,
@@ -349,11 +443,13 @@ class ObservatoryDatabase:
                     ),
                 )
                 accepted += 1
+                if write.rowcount > 0:
+                    changed += 1
             self._prune_life_events(connection)
             persisted = int(
                 connection.execute("SELECT COUNT(*) FROM life_events").fetchone()[0]
             )
-        return {"accepted": accepted, "persisted": persisted}
+        return {"accepted": accepted, "changed": changed, "persisted": persisted}
 
     def list_life_events(self, limit: int = 160) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -378,12 +474,19 @@ class ObservatoryDatabase:
             row = connection.execute(
                 """
                 SELECT COUNT(*) AS total, MIN(occurred_at) AS oldest,
-                       MAX(occurred_at) AS newest
+                       MAX(occurred_at) AS newest, MAX(updated_at) AS updated
                 FROM life_events
                 """
             ).fetchone()
+        total = int(row["total"] or 0)
+        oldest = str(row["oldest"] or "")
+        newest = str(row["newest"] or "")
+        updated = str(row["updated"] or "")
         return {
-            "total": int(row["total"] or 0),
-            "oldest": str(row["oldest"] or ""),
-            "newest": str(row["newest"] or ""),
+            "total": total,
+            "oldest": oldest,
+            "newest": newest,
+            "revision": hashlib.sha256(
+                f"{total}|{oldest}|{newest}|{updated}".encode("utf-8")
+            ).hexdigest()[:16],
         }

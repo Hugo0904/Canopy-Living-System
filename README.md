@@ -13,10 +13,12 @@ evidence, Seed Memory proposal workflows, maintainer subsystem treatments, and
 three visual worlds. Activity is derived from existing Canopy receipts and task
 summaries without copying raw prompts or adding a second event database.
 
-The Evolution unit includes a read-only laboratory backed by
-`canopy observe evolution --json`. It shows only bounded, allowlisted public
-metrics and candidate observations; missing Proposal, Review, Experiment,
-Adoption, or Monitoring evidence is shown as unreported rather than inferred.
+The 3D scene includes a separate read-only **Laboratory** facility associated
+with the Evolution Rings. It is a UI projection, not a Canopy Core module or
+topology node, and is backed by `canopy observe evolution --json`. It shows only
+bounded, allowlisted public metrics and candidate observations; missing
+Proposal, Review, Experiment, Adoption, or Monitoring evidence is shown as
+unreported rather than inferred.
 
 The optional background music is hosted locally from credited CC0 and Creative
 Commons sources so playback stays offline and predictable. Attribution and
@@ -54,6 +56,10 @@ canopy living-system
 
 `uninstall` removes generated local runtime data and dependencies from this
 checkout. It does not remove Canopy, Seed Memory, or this Git repository.
+Install, start, and update also ask Canopy Core to verify its optional managed
+activity hooks through the narrow `canopy repair codex-hooks` contract. Uninstall
+first asks Core to restore the base hook footprint. The Living System never edits
+the hooks file or decides that a Core health finding is resolved.
 
 The Living System normally synchronizes in the background. The UI action
 **Sync living system** forces the same bounded refresh and reports how many
