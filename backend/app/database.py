@@ -21,6 +21,8 @@ class ObservatoryDatabase:
         treatment_max_records: int = 200,
         life_event_retention_days: int = 60,
         life_event_max_records: int = 5000,
+        guidance_retention_days: int = 60,
+        guidance_max_records: int = 500,
     ) -> None:
         self.path = path
         self._lock = threading.Lock()
@@ -30,6 +32,8 @@ class ObservatoryDatabase:
         self.treatment_max_records = treatment_max_records
         self.life_event_retention_days = life_event_retention_days
         self.life_event_max_records = life_event_max_records
+        self.guidance_retention_days = guidance_retention_days
+        self.guidance_max_records = guidance_max_records
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -90,6 +94,21 @@ class ObservatoryDatabase:
                     ON life_events(occurred_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_life_events_correlation
                     ON life_events(correlation_id, occurred_at DESC);
+
+                CREATE TABLE IF NOT EXISTS guidance_presentations (
+                    source_kind TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    decision TEXT NOT NULL,
+                    snoozed_until TEXT NOT NULL DEFAULT '',
+                    linked_artifact_type TEXT NOT NULL DEFAULT '',
+                    linked_artifact_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(source_kind, source_id, source_fingerprint)
+                );
+                CREATE INDEX IF NOT EXISTS idx_guidance_presentations_updated_at
+                    ON guidance_presentations(updated_at DESC);
                 """
             )
             connection.execute(
@@ -160,6 +179,10 @@ class ObservatoryDatabase:
                         "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?)",
                         (self._now(),),
                     )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)",
+                (self._now(),),
+            )
         if compact_released_pages:
             # v4 first reduces old full snapshots to small summaries. A single
             # offline-style VACUUM then returns the now-unused pages to disk;
@@ -226,6 +249,22 @@ class ObservatoryDatabase:
             )
             """,
             (self.life_event_max_records,),
+        )
+
+    def _prune_guidance_presentations(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "DELETE FROM guidance_presentations WHERE updated_at < ?",
+            (self._cutoff(self.guidance_retention_days),),
+        )
+        connection.execute(
+            """
+            DELETE FROM guidance_presentations
+            WHERE rowid NOT IN (
+                SELECT rowid FROM guidance_presentations
+                ORDER BY updated_at DESC LIMIT ?
+            )
+            """,
+            (self.guidance_max_records,),
         )
 
     def _snapshot_history_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -385,6 +424,101 @@ class ObservatoryDatabase:
             "operator_prompt": row["operator_prompt"],
             "status": row["status"],
             "proposal": json.loads(row["proposal_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def record_guidance_decision(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        source_fingerprint: str,
+        decision: str,
+        snoozed_until: str = "",
+        linked_artifact_type: str = "",
+        linked_artifact_id: str = "",
+    ) -> dict[str, Any]:
+        if source_kind not in {"issue", "question", "daily"}:
+            raise ValueError(f"unsupported guidance source kind: {source_kind}")
+        if decision not in {"snooze", "dismiss", "answered"}:
+            raise ValueError(f"unsupported guidance decision: {decision}")
+        now = self._now()
+        with self._lock, self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO guidance_presentations(
+                    source_kind, source_id, source_fingerprint, decision,
+                    snoozed_until, linked_artifact_type, linked_artifact_id,
+                    created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_kind, source_id, source_fingerprint)
+                DO UPDATE SET
+                    decision=excluded.decision,
+                    snoozed_until=excluded.snoozed_until,
+                    linked_artifact_type=excluded.linked_artifact_type,
+                    linked_artifact_id=excluded.linked_artifact_id,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    source_kind,
+                    source_id,
+                    source_fingerprint,
+                    decision,
+                    snoozed_until,
+                    linked_artifact_type,
+                    linked_artifact_id,
+                    now,
+                    now,
+                ),
+            )
+            self._prune_guidance_presentations(connection)
+        return self.get_guidance_presentation(
+            source_kind=source_kind,
+            source_id=source_id,
+            source_fingerprint=source_fingerprint,
+        ) or {}
+
+    def get_guidance_presentation(
+        self,
+        *,
+        source_kind: str,
+        source_id: str,
+        source_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM guidance_presentations
+                WHERE source_kind = ? AND source_id = ? AND source_fingerprint = ?
+                """,
+                (source_kind, source_id, source_fingerprint),
+            ).fetchone()
+        return self._guidance_presentation_row(row) if row else None
+
+    def guidance_presentations(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM guidance_presentations ORDER BY updated_at DESC"
+            ).fetchall()
+        return {
+            (
+                str(row["source_kind"]),
+                str(row["source_id"]),
+                str(row["source_fingerprint"]),
+            ): self._guidance_presentation_row(row)
+            for row in rows
+        }
+
+    def _guidance_presentation_row(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "source_kind": row["source_kind"],
+            "source_id": row["source_id"],
+            "source_fingerprint": row["source_fingerprint"],
+            "decision": row["decision"],
+            "snoozed_until": row["snoozed_until"],
+            "linked_artifact_type": row["linked_artifact_type"],
+            "linked_artifact_id": row["linked_artifact_id"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }

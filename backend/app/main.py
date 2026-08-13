@@ -13,7 +13,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .canopy_adapter import CanopyAdapter
+from .companionship import CompanionBriefingCache
 from .database import ObservatoryDatabase
+from .guidance import (
+    find_guidance_message,
+    observation_unavailable_reason,
+    select_guidance,
+)
 from .proposals import build_treatment_proposal
 from .remediation_adapter import (
     RemediationAdapter,
@@ -38,6 +44,11 @@ database = ObservatoryDatabase(
 )
 adapter = CanopyAdapter(settings.canopy_root, cache_seconds=settings.snapshot_cache_seconds)
 remediation_adapter = RemediationAdapter(settings)
+companion_cache = CompanionBriefingCache(
+    latitude=settings.weather_latitude,
+    longitude=settings.weather_longitude,
+    location=settings.weather_location,
+)
 life_sync_state: dict[str, Any] = {
     "status": "starting",
     "last_synced_at": "",
@@ -234,6 +245,20 @@ async def snapshot_sync_loop() -> None:
         await asyncio.sleep(settings.snapshot_sync_seconds)
 
 
+async def companion_briefing_loop() -> None:
+    """Refresh optional public companion sources away from the request path."""
+
+    while True:
+        try:
+            await asyncio.to_thread(companion_cache.refresh)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The optional companion must never affect observation or Core.
+            pass
+        await asyncio.sleep(settings.companion_refresh_seconds)
+
+
 async def snapshot_projection(*, refresh: bool = False) -> dict[str, Any]:
     if not refresh:
         persisted = await asyncio.to_thread(_latest_verified_snapshot)
@@ -253,14 +278,18 @@ async def snapshot_projection(*, refresh: bool = False) -> dict[str, Any]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     initialize_runtime()
-    life_task = asyncio.create_task(life_event_sync_loop())
-    snapshot_task = asyncio.create_task(snapshot_sync_loop())
+    tasks = [
+        asyncio.create_task(life_event_sync_loop()),
+        asyncio.create_task(snapshot_sync_loop()),
+    ]
+    if settings.companion_enabled:
+        tasks.append(asyncio.create_task(companion_briefing_loop()))
     try:
         yield
     finally:
-        life_task.cancel()
-        snapshot_task.cancel()
-        await asyncio.gather(life_task, snapshot_task, return_exceptions=True)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(
@@ -315,6 +344,17 @@ class RemediationAuthorizationInput(BaseModel):
     proposal_hash: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
 
 
+class GuidanceDecisionInput(BaseModel):
+    decision: Literal["snooze", "dismiss"]
+    expected_fingerprint: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    snooze_hours: int = Field(default=24, ge=1, le=720)
+
+
+class GuidanceAnswerInput(BaseModel):
+    answer: str = Field(min_length=1, max_length=1800)
+    expected_fingerprint: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+
+
 async def _call_remediation(
     method: Any,
     *args: Any,
@@ -330,6 +370,52 @@ async def _call_remediation(
         raise HTTPException(status_code=502, detail=exc.as_dict()) from exc
     except RemediationAdapterError as exc:
         raise HTTPException(status_code=500, detail=exc.as_dict()) from exc
+
+
+def _unavailable_guidance(sync: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "contract_id": "canopy.living-system.guidance",
+        "status": "unavailable",
+        "reason": observation_unavailable_reason(sync),
+        "message": None,
+    }
+
+
+async def _current_guidance_source(
+    *,
+    message_id: str,
+    expected_fingerprint: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve an action against the exact current public evidence version."""
+
+    projection = await snapshot_projection()
+    snapshot = projection["snapshot"]
+    sync = projection.get("sync") if isinstance(projection.get("sync"), dict) else {}
+    availability = select_guidance(snapshot=snapshot, sync=sync)
+    if availability["status"] == "unavailable":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": availability["reason"],
+                "message": "Current Canopy observation evidence is unavailable",
+            },
+        )
+    message = find_guidance_message(
+        snapshot,
+        message_id=message_id,
+        expected_fingerprint=expected_fingerprint,
+        companion_messages=companion_cache.all_messages(),
+    )
+    if message is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "guidance_evidence_changed",
+                "message": "The guidance source changed; refresh before acting",
+            },
+        )
+    return snapshot, message
 
 
 @app.get("/api/health")
@@ -356,6 +442,11 @@ async def api_health() -> dict[str, Any]:
             "life_events_days": settings.life_event_retention_days,
             "life_events_max": settings.life_event_max_records,
             "life_events_sync_seconds": settings.life_event_sync_seconds,
+            "companion_refresh_seconds": settings.companion_refresh_seconds,
+        },
+        "companion": {
+            "enabled": settings.companion_enabled,
+            **companion_cache.status(),
         },
         "life_sync": dict(life_sync_state),
         "snapshot_sync": dict(snapshot_sync_state),
@@ -382,6 +473,163 @@ async def api_snapshot_revision() -> dict[str, Any]:
 async def api_sync() -> dict[str, Any]:
     """Rebuild the local projection through the same path as automatic sync."""
     return await snapshot_projection(refresh=True)
+
+
+@app.get("/api/guidance/current")
+async def api_current_guidance(
+    locale: Literal["zh-TW", "zh-CN", "en"] = "zh-TW",
+) -> dict[str, Any]:
+    """Return one bounded Fura prompt from current Core-owned evidence."""
+
+    try:
+        projection = await snapshot_projection()
+    except HTTPException:
+        return _unavailable_guidance(dict(snapshot_sync_state))
+    snapshot = projection["snapshot"]
+    sync = projection.get("sync") if isinstance(projection.get("sync"), dict) else {}
+    presentations = await asyncio.to_thread(database.guidance_presentations)
+    return select_guidance(
+        snapshot=snapshot,
+        sync=sync,
+        presentations=presentations,
+        companion_messages=(
+            companion_cache.messages(locale) if settings.companion_enabled else []
+        ),
+    )
+
+
+@app.post("/api/guidance/{message_id}/decision")
+async def api_guidance_decision(
+    message_id: str,
+    payload: GuidanceDecisionInput,
+) -> dict[str, Any]:
+    _, message = await _current_guidance_source(
+        message_id=message_id,
+        expected_fingerprint=payload.expected_fingerprint,
+    )
+    target = message["target"]
+    snoozed_until = ""
+    if payload.decision == "snooze":
+        snoozed_until = (
+            datetime.now(timezone.utc) + timedelta(hours=payload.snooze_hours)
+        ).isoformat(timespec="seconds")
+    await asyncio.to_thread(
+        database.record_guidance_decision,
+        source_kind=message["kind"],
+        source_id=target["id"],
+        source_fingerprint=message["fingerprint"],
+        decision=payload.decision,
+        snoozed_until=snoozed_until,
+    )
+    return {
+        "schema_version": 1,
+        "contract_id": "canopy.living-system.guidance-decision",
+        "status": "recorded",
+        "message_id": message["id"],
+        "decision": payload.decision,
+        "snoozed_until": snoozed_until,
+    }
+
+
+@app.post("/api/guidance/{message_id}/answer")
+async def api_guidance_answer(
+    message_id: str,
+    payload: GuidanceAnswerInput,
+) -> dict[str, Any]:
+    snapshot, message = await _current_guidance_source(
+        message_id=message_id,
+        expected_fingerprint=payload.expected_fingerprint,
+    )
+    if message["kind"] != "question" or message["target"]["type"] != "seed_card":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "guidance_not_answerable",
+                "message": "This guidance item is not a Seed reflection question",
+            },
+        )
+    answer = payload.answer.strip()
+    if not answer:
+        raise HTTPException(status_code=422, detail="answer must not be blank")
+
+    target_id = message["target"]["id"]
+    previous = await asyncio.to_thread(
+        database.get_guidance_presentation,
+        source_kind="question",
+        source_id=target_id,
+        source_fingerprint=message["fingerprint"],
+    )
+    if previous and previous.get("decision") == "answered":
+        linked_id = str(previous.get("linked_artifact_id", ""))
+        linked = (
+            await asyncio.to_thread(database.get_treatment, linked_id)
+            if linked_id
+            else None
+        )
+        if linked is not None:
+            return {
+                "schema_version": 1,
+                "contract_id": "canopy.living-system.guidance-answer",
+                "status": "awaiting_ai_review",
+                "message_id": message["id"],
+                "treatment": linked,
+                "provenance": {
+                    "operator_evidence": "operator_explicit",
+                    "ai_inferred_candidate": None,
+                    "distillation_status": "awaiting_ai_review",
+                },
+            }
+
+    try:
+        request_type, proposal = build_treatment_proposal(
+            snapshot=snapshot,
+            target_type="seed_card",
+            target_id=target_id,
+            intent="update",
+            operator_prompt=f"使用者回覆芙拉的反思問題：{answer}",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    proposal["dialogue"] = {
+        "question": message["body"],
+        "operator_evidence": {
+            "provenance": "operator_explicit",
+            "content": answer,
+        },
+        "ai_inferred_candidate": None,
+        "distillation_status": "awaiting_ai_review",
+        "learning_status": "not_yet_learned",
+    }
+    treatment = await asyncio.to_thread(
+        database.create_treatment,
+        request_type=request_type,
+        target_type="seed_card",
+        target_id=target_id,
+        intent="update",
+        operator_prompt=f"使用者回覆芙拉的反思問題：{answer}",
+        proposal=proposal,
+    )
+    await asyncio.to_thread(
+        database.record_guidance_decision,
+        source_kind="question",
+        source_id=target_id,
+        source_fingerprint=message["fingerprint"],
+        decision="answered",
+        linked_artifact_type=request_type,
+        linked_artifact_id=treatment["id"],
+    )
+    return {
+        "schema_version": 1,
+        "contract_id": "canopy.living-system.guidance-answer",
+        "status": "awaiting_ai_review",
+        "message_id": message["id"],
+        "treatment": treatment,
+        "provenance": {
+            "operator_evidence": "operator_explicit",
+            "ai_inferred_candidate": None,
+            "distillation_status": "awaiting_ai_review",
+        },
+    }
 
 
 @app.get("/api/cards")

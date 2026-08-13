@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import {
   Activity,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   ChevronUp,
   HeartPulse,
@@ -110,7 +109,7 @@ export function LifeStreamPanel({
   onOpenTimeline,
 }: LifeStreamPanelProps) {
   const [filter, setFilter] = useState<LifeFilter>("all");
-  const [expandedCorrelationId, setExpandedCorrelationId] = useState("");
+  const [expandedStoryId, setExpandedStoryId] = useState("");
   const stories = useMemo(() => buildLifeStories(events), [events]);
   const visibleStories = useMemo(() => stories.filter((story) => {
     if (filter === "growth") return story.learning.mode !== "none" || story.evolution_requested;
@@ -122,28 +121,21 @@ export function LifeStreamPanel({
   const omittedCount = omittedEvidenceCount(sync.omitted);
 
   function selectStory(story: LifeStory) {
-    setExpandedCorrelationId((currentId) => currentId === story.correlation_id ? "" : story.correlation_id);
+    setExpandedStoryId((currentId) => currentId === story.id ? "" : story.id);
     onSelectModule(story.module_id);
   }
 
-  if (!open) {
-    return (
-      <button className="life-stream-peek" onClick={onToggle} aria-label={t(locale, "life.open")}>
-        <span className="life-pulse" data-status={sync.status} />
-        <HeartPulse size={17} />
-        <span><strong>{t(locale, "life.title")}</strong><small>{current?.summary || t(locale, "life.no_events")}</small></span>
-        <em>{stories.length}</em>
-        <ChevronDown className="life-fold-direction" size={15} />
-      </button>
-    );
-  }
+  if (!open) return null;
 
   return (
-    <aside className="life-stream-panel" aria-label={t(locale, "aria.life_stream")} data-sync={sync.status}>
+    <aside className="life-stream-panel fura-notebook" aria-label={t(locale, "aria.life_stream")} data-sync={sync.status} data-story-expanded={expandedStoryId ? "true" : "false"}>
       <header className="life-stream-heading">
-        <div><HeartPulse size={18} /><span><small>{t(locale, "life.eyebrow")}</small><strong>{t(locale, "life.title")}</strong></span></div>
+        <div>
+          <span className="fura-notebook-avatar" aria-hidden="true" />
+          <span><small>{t(locale, "fura.notebook_eyebrow")}</small><strong>{t(locale, "fura.notebook_title")}</strong></span>
+        </div>
         <div className="life-heading-actions">
-          <span className="life-sync-state" data-status={sync.status}><i />{t(locale, `life.sync.${sync.status}`)}</span>
+          <span className="life-sync-state" data-status={sync.status}><i /><HeartPulse size={12} />{t(locale, `life.sync.${sync.status}`)}</span>
           <button className="icon-button" onClick={onToggle} aria-label={t(locale, "life.close")}><ChevronUp size={16} /></button>
         </div>
       </header>
@@ -168,13 +160,13 @@ export function LifeStreamPanel({
 
       <div className="life-event-stream" aria-live="polite">
         {visibleStories.length ? visibleStories.slice(0, 24).map((story) => {
-          const expanded = expandedCorrelationId === story.correlation_id;
+          const expanded = expandedStoryId === story.id;
           const facts = VISIBLE_FACTS
             .map((key) => [key, story.facts?.[key]] as const)
             .filter(([, value]) => value && value !== "unreported" && value !== "false");
           const learning = learningCopy(story, locale);
           return (
-            <article key={story.id} className="life-event" data-kind="turn_story" data-phase={story.phase} data-status={story.status} data-expanded={expanded ? "true" : "false"}>
+            <article key={story.id} className="life-event" data-story-id={story.id} data-kind="turn_story" data-phase={story.phase} data-status={story.status} data-expanded={expanded ? "true" : "false"}>
               <button className="life-event-main" onClick={() => selectStory(story)} aria-expanded={expanded}>
                 <span className="life-event-icon">{phaseIcon(story)}</span>
                 <span className="life-event-copy">

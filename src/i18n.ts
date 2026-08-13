@@ -26,23 +26,37 @@ const ZH_TW: Messages = {
   "issue_detail.automatic": "自動處理",
   "issue_detail.automatic_yes": "Canopy 已自動接手",
   "issue_detail.automatic_unreported": "尚未提供可自動處理方式",
+  "issue_detail.automatic_verification": "Canopy 正在等待真實工具事件並自動驗證",
+  "issue_detail.manual_start": "由你啟動一次，後續依標準流程處理",
   "issue_detail.needs_operator": "需要主人決定",
+  "issue_detail.state_actionable": "可立即開始診斷與修正",
   "issue_detail.action": "處理內容",
   "issue_detail.verification": "驗證方式／結果",
   "issue_detail.case": "追蹤代號",
+  "issue_detail.evidence": "Canopy Core 證據",
   "issue_detail.previous": "上一項提醒",
   "issue_detail.next": "下一項提醒",
   "issue_detail.position": "第 {current} 項，共 {count} 項提醒",
   "issue_detail.treat": "開始治療",
+  "issue_detail.treat_future_closure": "改善後續回合的閉環",
+  "issue_detail.future_closure_scope": "這會修正後續回合的紀錄流程；既有缺漏會如實保留，不會補造歷史證據。",
+  "issue_detail.recheck": "立即重新檢查",
+  "issue_detail.automatic_followup": "設定已修正，不需要再建立一筆治療；Canopy 會在支援的真實工具操作後自動驗證。你也可以立即重新同步目前證據。",
   "issue_detail.not_requestable": "這項訊號目前只能查看原因；Canopy Core 尚未核發可執行的修正請求。",
   "issue_detail.seed_routing_miss": "Canopy 發現某次延續中的架構工作加入新範圍時，沒有被送進應有的 Evolution 流程。治療會先診斷路由判斷，再提出回歸測試與可驗證修正。",
+  "issue_detail.required_lifecycle_failures": "Canopy 找到 {count} 個原本必須完成收尾的 AI 回合，但目前只有開始紀錄，沒有完成、失敗或中止的終結紀錄。因此它無法證明這些回合已經閉環。",
+  "issue_evidence.required_closure_rate": "必要回合閉環率：{value}%",
+  "issue_evidence.unclosed_required": "缺少終結紀錄的必要回合：{count} 個",
+  "issue_evidence.interrupted_required": "另有 {count} 個回合已明確記錄為中止，不包含在上面的缺漏數量內。",
+  "issue_evidence.required_evidence_missing": "原因分類：{count} 個回合缺少終結證據",
+  "issue_evidence.required_ids": "影響回合的追蹤代號：{ids}",
   "remediation.eyebrow": "生命體治療",
   "remediation.title": "診斷與修正",
   "remediation.boundary": "這裡的「治療」是生命體畫面用語；檯面下會轉成 Canopy 標準修正／優化流程，不會建立另一套狀態。",
   "remediation.reason": "為什麼需要治療",
   "remediation.mode": "處理方式",
-  "remediation.mode.embedded": "由這個介面處理",
-  "remediation.mode.embedded_detail": "介面代你操作同一筆 Canopy 修正；診斷時才呼叫 Codex",
+  "remediation.mode.embedded": "在這裡治療",
+  "remediation.mode.embedded_detail": "留在目前畫面查看診斷與修正進度；需要分析時才會請 Codex 協助",
   "remediation.mode.handoff": "到 Codex 接續",
   "remediation.mode.handoff_detail": "只建立接續指令，不在這裡執行；沿用同一個修正代號",
   "remediation.model": "Codex 模型",
@@ -98,9 +112,11 @@ const ZH_TW: Messages = {
   "remediation.error.copy": "無法複製，請手動選取文字。",
   "issue_action.repair_codex_hooks": "重新建立並核對 Canopy 管理的 Codex 工具事件 hooks，保留其他既有 hooks",
   "issue_action.review_seed_operator_issue": "由 Seed Core 依來源證據進行語意複查；未經確認不會直接改寫記憶卡",
+  "issue_action.repair_future_closure": "核對缺少證據與缺少終結事件的差異，修正負責的生命週期入口，但不改寫既有歷史。",
   "issue_verification.real_tool_pair": "等待同一筆真實工具事件依序出現「開始」與「完成／失敗」",
   "issue_verification.doctor": "重新執行 Canopy Doctor 並核對 managed hooks",
   "issue_verification.seed_operator_review": "重新執行 Seed 健康檢查；同一追蹤代號離開待複查清單，且既有演化流程標示已解決，才算完成。",
+  "issue_verification.recheck_owning_evidence": "由原本負責的 Canopy Core 證據來源重新評估同一個追蹤項目。",
   "owner.canopy_core": "Canopy Core · 主機生命週期",
   "owner.seed_core": "Seed Core · 記憶與語意複查",
   "owner.seed_card": "Seed 卡片 · 主人與 AI 複查",
@@ -444,6 +460,8 @@ const ZH_TW: Messages = {
   "settings.effect_glow_detail": "神木燈火、遺跡光源、額外光暈與能量層。",
   "settings.effect_motion": "生命單元懸浮",
   "settings.effect_motion_detail": "生命單元的呼吸式升降、旋轉與選取縮放。",
+  "settings.effect_fura": "芙拉動作",
+  "settings.effect_fura_detail": "芙拉會低頻走動、呼吸、坐下、伸展與做小運動；頁面隱藏時會停止。",
   "settings.sound_effects_on": "開啟",
   "settings.sound_effects_off": "關閉",
   "music.greenhouse": "古樹凱爾特",
@@ -529,6 +547,33 @@ const ZH_TW: Messages = {
   "activity.status.interrupted": "已中止",
   "life.eyebrow": "你的 AI 助理",
   "life.title": "生命歷程",
+  "fura.name": "芙拉",
+  "fura.aria": "芙拉，神木的小精靈",
+  "fura.open_notebook": "打開芙拉的記事本",
+  "fura.drag_hint": "拖曳可以移動芙拉；短按可打開記事本；聚焦後可用方向鍵移動，Home 鍵重置位置",
+  "fura.notebook_eyebrow": "芙拉帶來的生命歷程",
+  "fura.notebook_title": "芙拉的記事本",
+  "fura.source.core": "依 Canopy Core 當前可查證訊號",
+  "fura.source.question": "來自既有 Seed 卡片的反思問題",
+  "fura.source.daily": "芙拉帶來的每日小訊息（可查看來源）",
+  "fura.expand_guidance": "展開芙拉的訊息",
+  "fura.collapse_guidance": "收合芙拉的訊息",
+  "fura.quiet": "目前沒有需要你處理的事，我會繼續留意神木的狀況。",
+  "fura.unavailable": "我現在無法確認最新生命訊號，所以先不猜測。你仍可查看記事本裡已保存的歷程。",
+  "fura.contract_invalid": "最新生命訊號沒有通過資料契約，我先不把它說成健康或無事。",
+  "fura.inspect": "查看原因",
+  "fura.diagnose": "開始診斷",
+  "fura.answer": "回覆芙拉",
+  "fura.snooze": "稍後提醒",
+  "fura.dismiss": "這次先不做",
+  "fura.open_source": "查看來源",
+  "fura.answer_label": "你的回答",
+  "fura.answer_placeholder": "把你的想法告訴芙拉…",
+  "fura.answer_submit": "送進複查流程",
+  "fura.answer_cancel": "先不回答",
+  "fura.answer_boundary": "你的原話會保留為 operator_explicit；AI 推論仍是待複查候選，不會直接宣稱 Canopy 已學會。",
+  "fura.answer_saved": "芙拉已保留你的原話並送進既有複查流程；目前尚未宣稱 Canopy 已學會。",
+  "fura.action_unavailable": "這項訊號目前沒有可安全接續的操作。",
   "life.open": "展開生命歷程",
   "life.close": "收合生命歷程",
   "life.current": "最新協助進度",
@@ -864,23 +909,37 @@ const EN: Messages = {
   "issue_detail.automatic": "Automatic handling",
   "issue_detail.automatic_yes": "Canopy has taken ownership automatically",
   "issue_detail.automatic_unreported": "No automatic handling path reported",
+  "issue_detail.automatic_verification": "Canopy is waiting for a real tool event and will verify it automatically",
+  "issue_detail.manual_start": "Start it once; the canonical workflow handles the remaining stages",
   "issue_detail.needs_operator": "Needs an operator decision",
+  "issue_detail.state_actionable": "Ready to diagnose and remediate",
   "issue_detail.action": "Action",
   "issue_detail.verification": "Verification",
   "issue_detail.case": "Tracking case",
+  "issue_detail.evidence": "Canopy Core evidence",
   "issue_detail.previous": "Previous issue",
   "issue_detail.next": "Next issue",
   "issue_detail.position": "Issue {current} of {count}",
   "issue_detail.treat": "Start treatment",
+  "issue_detail.treat_future_closure": "Improve closure for future turns",
+  "issue_detail.future_closure_scope": "This improves future lifecycle records. Existing gaps remain visible; historical evidence is never fabricated.",
+  "issue_detail.recheck": "Check again now",
+  "issue_detail.automatic_followup": "The configuration is already repaired, so no duplicate treatment is needed. Canopy will verify it after a supported real tool action, and you can refresh the current evidence now.",
   "issue_detail.not_requestable": "This signal is currently read-only. Canopy Core has not issued an executable remediation request.",
   "issue_detail.seed_routing_miss": "Canopy found that added scope in a continuing architecture task was not routed into the required Evolution workflow. Treatment will diagnose routing first, then propose regression coverage and a verifiable correction.",
+  "issue_detail.required_lifecycle_failures": "Canopy found {count} AI turn(s) that required closure but currently have only a start record, with no completed, failed, or interrupted terminal record. Their closure therefore cannot be proven.",
+  "issue_evidence.required_closure_rate": "Required-turn closure rate: {value}%",
+  "issue_evidence.unclosed_required": "Required turns missing terminal records: {count}",
+  "issue_evidence.interrupted_required": "Another {count} turn(s) have an explicit interrupted record and are not included in the missing count above.",
+  "issue_evidence.required_evidence_missing": "Cause classification: {count} turn(s) lack terminal evidence",
+  "issue_evidence.required_ids": "Affected turn tracking IDs: {ids}",
   "remediation.eyebrow": "LIVING SYSTEM TREATMENT",
   "remediation.title": "Diagnose and remediate",
   "remediation.boundary": "Treatment is the living-system UI term. Under the surface, this becomes Canopy's canonical remediation or optimization workflow; no parallel state is created.",
   "remediation.reason": "Why treatment is needed",
   "remediation.mode": "Handling mode",
-  "remediation.mode.embedded": "Handle in this interface",
-  "remediation.mode.embedded_detail": "This UI operates the same Canopy remediation and calls Codex only when diagnosis runs",
+  "remediation.mode.embedded": "Treat it here",
+  "remediation.mode.embedded_detail": "Stay on this screen to follow diagnosis and remediation; Codex is called only when analysis is needed",
   "remediation.mode.handoff": "Continue in Codex",
   "remediation.mode.handoff_detail": "Create continuation instructions without running here; keep the same remediation ID",
   "remediation.model": "Codex model",
@@ -936,9 +995,11 @@ const EN: Messages = {
   "remediation.error.copy": "Could not copy. Select the text manually.",
   "issue_action.repair_codex_hooks": "Rebuild and verify Canopy-managed Codex tool-event hooks while preserving existing third-party hooks",
   "issue_action.review_seed_operator_issue": "Have Seed Core review the source evidence; no memory card is rewritten without confirmation",
+  "issue_action.repair_future_closure": "Distinguish missing evidence from a missing terminal event and repair the responsible lifecycle entrypoint without rewriting history.",
   "issue_verification.real_tool_pair": "Wait for one real tool event to show both start and completion or failure",
   "issue_verification.doctor": "Run Canopy Doctor again and verify the managed hooks",
   "issue_verification.seed_operator_review": "Re-run Seed health; closure requires the same tracking id to leave the review list and the existing evolution lifecycle to mark it resolved.",
+  "issue_verification.recheck_owning_evidence": "Re-evaluate the same tracking item from its owning Canopy Core evidence source.",
   "owner.canopy_core": "Canopy Core · host lifecycle",
   "owner.seed_core": "Seed Core · memory and semantic review",
   "owner.seed_card": "Seed card · operator and AI review",
@@ -1282,6 +1343,8 @@ const EN: Messages = {
   "settings.effect_glow_detail": "Tree lanterns, ruin lights, additive halos, and energy layers.",
   "settings.effect_motion": "Living-unit hover",
   "settings.effect_motion_detail": "Breathing lift, rotation, and eased selection scaling for living units.",
+  "settings.effect_fura": "Fura movement",
+  "settings.effect_fura_detail": "Fura occasionally walks, breathes, sits, stretches, and exercises; movement stops while the page is hidden.",
   "settings.sound_effects_on": "On",
   "settings.sound_effects_off": "Off",
   "music.greenhouse": "Ancient-tree Celtic",
@@ -1367,6 +1430,33 @@ const EN: Messages = {
   "activity.status.interrupted": "Interrupted",
   "life.eyebrow": "YOUR AI ASSISTANT",
   "life.title": "Life history",
+  "fura.name": "Fura",
+  "fura.aria": "Fura, the spirit of the ancient tree",
+  "fura.open_notebook": "Open Fura's notebook",
+  "fura.drag_hint": "Drag to move Fura; tap to open her notebook; use arrow keys to move and Home to reset while focused",
+  "fura.notebook_eyebrow": "LIFE HISTORY FROM FURA",
+  "fura.notebook_title": "Fura's notebook",
+  "fura.source.core": "From current verifiable Canopy Core evidence",
+  "fura.source.question": "A reflection question from an existing Seed card",
+  "fura.source.daily": "A sourced daily note from Fura",
+  "fura.expand_guidance": "Expand Fura's message",
+  "fura.collapse_guidance": "Collapse Fura's message",
+  "fura.quiet": "Nothing needs your attention right now. I will keep watching over the tree.",
+  "fura.unavailable": "I cannot confirm the latest life signal, so I will not guess. You can still read the history already saved in my notebook.",
+  "fura.contract_invalid": "The latest life signal failed its data contract. I will not present that as healthy or uneventful.",
+  "fura.inspect": "See why",
+  "fura.diagnose": "Start diagnosis",
+  "fura.answer": "Answer Fura",
+  "fura.snooze": "Remind me later",
+  "fura.dismiss": "Skip this time",
+  "fura.open_source": "View source",
+  "fura.answer_label": "Your answer",
+  "fura.answer_placeholder": "Tell Fura what you think…",
+  "fura.answer_submit": "Send for review",
+  "fura.answer_cancel": "Not now",
+  "fura.answer_boundary": "Your exact words are kept as operator_explicit. AI inference remains a review candidate and is not presented as something Canopy has learned.",
+  "fura.answer_saved": "Fura kept your exact words and sent them into the existing review flow. Canopy has not yet claimed that it learned this.",
+  "fura.action_unavailable": "This signal has no safe continuation action yet.",
   "life.open": "Open life history",
   "life.close": "Collapse life history",
   "life.current": "Latest assistance update",
@@ -1662,6 +1752,12 @@ export function localizedLifecycle(locale: Locale, lifecycle: string): string {
 }
 
 export function localizedIssueTitle(locale: Locale, issue: CanopyIssue): string {
+  const learningCategory = typeof issue.params?.category === "string" ? issue.params.category : "";
+  if (issue.code === "seed_learning_issue" && learningCategory) {
+    const key = `lab.finding_summary.${learningCategory}`;
+    const translated = t(locale, key);
+    if (translated !== key) return translated;
+  }
   if (issue.code) {
     const params = Object.fromEntries(Object.entries(issue.params ?? {}).map(([key, value]) => [key, String(value)]));
     const translated = t(locale, `issue.${issue.code}`, params);
@@ -1671,10 +1767,38 @@ export function localizedIssueTitle(locale: Locale, issue: CanopyIssue): string 
 }
 
 export function localizedIssueDetail(locale: Locale, issue: CanopyIssue): string {
+  const learningCategory = typeof issue.params?.category === "string" ? issue.params.category : "";
+  if (issue.code === "seed_learning_issue" && learningCategory) {
+    const key = `lab.finding_suggestion.${learningCategory}`;
+    const translated = t(locale, key);
+    if (translated !== key) return translated;
+  }
   if (issue.code) {
     const params = Object.fromEntries(Object.entries(issue.params ?? {}).map(([key, value]) => [key, String(value)]));
     const translated = t(locale, `issue_detail.${issue.code}`, params);
     if (translated !== `issue_detail.${issue.code}`) return translated;
   }
   return issue.detail || t(locale, "issue_detail.detail_unreported");
+}
+
+export function localizedIssueEvidence(locale: Locale, evidence: string): string {
+  const closureRate = evidence.match(/^required_closure_rate=(\d+(?:\.\d+)?)$/);
+  if (closureRate) {
+    return t(locale, "issue_evidence.required_closure_rate", {
+      value: (Number(closureRate[1]) * 100).toFixed(1),
+    });
+  }
+  const unclosed = evidence.match(/^unclosed_required=(\d+)$/);
+  if (unclosed) return t(locale, "issue_evidence.unclosed_required", { count: unclosed[1] });
+  const interrupted = evidence.match(/^interrupted_required=(\d+)$/);
+  if (interrupted) return t(locale, "issue_evidence.interrupted_required", { count: interrupted[1] });
+  if (evidence.startsWith("reconciliation=")) {
+    const missing = evidence.match(/"required_evidence_missing"\s*:\s*(\d+)/);
+    if (missing) return t(locale, "issue_evidence.required_evidence_missing", { count: missing[1] });
+  }
+  if (evidence.startsWith("required_ids=")) {
+    const ids = evidence.slice("required_ids=".length).split(",").filter(Boolean).join(locale === "en" ? ", " : "、");
+    return t(locale, "issue_evidence.required_ids", { ids });
+  }
+  return evidence;
 }

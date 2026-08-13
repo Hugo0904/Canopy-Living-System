@@ -27,6 +27,11 @@ class Settings:
     life_event_retention_days: int
     life_event_max_records: int
     life_event_sync_seconds: int
+    companion_enabled: bool
+    companion_refresh_seconds: int
+    weather_latitude: float
+    weather_longitude: float
+    weather_location: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -79,6 +84,12 @@ class Settings:
             except ValueError:
                 return fallback
 
+        def bounded_float(name: str, fallback: float, minimum: float, maximum: float) -> float:
+            try:
+                return max(minimum, min(maximum, float(os.getenv(name, str(fallback)))))
+            except ValueError:
+                return fallback
+
         return cls(
             project_root=project_root,
             canopy_root=canopy_root,
@@ -124,5 +135,24 @@ class Settings:
             ),
             life_event_sync_seconds=bounded_int(
                 "CANOPY_LIVING_SYSTEM_SYNC_SECONDS", 12, 4, 60
+            ),
+            companion_enabled=os.getenv(
+                "CANOPY_LIVING_SYSTEM_COMPANION_BRIEFINGS", "on"
+            ).strip().lower() not in {"0", "false", "off", "no"},
+            companion_refresh_seconds=bounded_int(
+                "CANOPY_LIVING_SYSTEM_COMPANION_REFRESH_SECONDS",
+                21600,
+                1800,
+                86400,
+            ),
+            weather_latitude=bounded_float(
+                "CANOPY_LIVING_SYSTEM_WEATHER_LATITUDE", 25.033, -90, 90
+            ),
+            weather_longitude=bounded_float(
+                "CANOPY_LIVING_SYSTEM_WEATHER_LONGITUDE", 121.5654, -180, 180
+            ),
+            weather_location=(
+                os.getenv("CANOPY_LIVING_SYSTEM_WEATHER_LOCATION", "臺北").strip()[:80]
+                or "臺北"
             ),
         )

@@ -146,6 +146,60 @@ export interface LifeEventsRevisionResponse {
   sync: LifeEventsResponse["sync"];
 }
 
+export type FuraGuidanceStatus = "available" | "quiet" | "unavailable";
+export type FuraGuidanceKind = "issue" | "question" | "daily";
+export type FuraGuidanceAction = "inspect" | "diagnose" | "answer" | "source" | "snooze" | "dismiss" | "open_notebook";
+
+export interface FuraGuidanceMessage {
+  id: string;
+  fingerprint: string;
+  kind: FuraGuidanceKind;
+  title: string;
+  body: string;
+  source_owner: string;
+  observed_at: string;
+  claim_status: "core_evidence" | "operator_question" | "external_verified";
+  target?: {
+    type: "issue" | "seed_card" | "daily";
+    id: string;
+    module_ids?: string[];
+    category?: string;
+    source_name?: string;
+    source_url?: string;
+  };
+  requestable: boolean;
+  evidence: string[];
+  actions: FuraGuidanceAction[];
+}
+
+export interface FuraGuidanceResponse {
+  schema_version: number;
+  contract_id: string;
+  status: FuraGuidanceStatus;
+  message: FuraGuidanceMessage | null;
+  reason?: string;
+}
+
+export interface FuraGuidanceDecisionResponse {
+  schema_version: number;
+  contract_id: string;
+  status: string;
+  message_id: string;
+  decision: "snooze" | "dismiss";
+  snoozed_until?: string;
+}
+
+export interface FuraGuidanceAnswerResponse {
+  status: "awaiting_ai_review" | string;
+  message_id: string;
+  treatment: TreatmentRequest;
+  provenance: {
+    operator_evidence: "operator_explicit";
+    ai_inferred_candidate: null;
+    distillation_status: "awaiting_ai_review";
+  };
+}
+
 export interface SnapshotRevisionResponse {
   schema_version: number;
   contract_id: string;

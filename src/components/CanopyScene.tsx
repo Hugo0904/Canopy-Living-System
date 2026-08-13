@@ -39,11 +39,12 @@ export interface VisualEffects {
   clouds: boolean;
   glow: boolean;
   motion: boolean;
+  fura: boolean;
 }
 
 export type EffectDistance = "near" | "far";
 
-type ActiveVisualEffects = Omit<VisualEffects, "master">;
+type ActiveVisualEffects = Pick<VisualEffects, "particles" | "flow" | "clouds" | "glow" | "motion">;
 
 function interactionPriority(object: THREE.Object3D): number {
   let current: THREE.Object3D | null = object;
@@ -96,6 +97,7 @@ interface SceneProps {
   focusRevision: number;
   activeModuleIds: string[];
   growthProgress: number;
+  growthEvidence: number;
   onSelectModule: (moduleId: string) => void;
   onSelectCard: (cardId: string) => void;
   onSelectStructure: (nodeId: string) => void;
@@ -448,13 +450,34 @@ function TreeSpiritMotes({ detailed, reducedMotion }: { detailed: boolean; reduc
   );
 }
 
-function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visualStyle: "detailed" | "simple"; locale: Locale; growthProgress: number; effects: ActiveVisualEffects; onSelect: () => void }) {
+function Tree({ visualStyle, locale, growthProgress, growthEvidence, effects, onSelect }: { visualStyle: "detailed" | "simple"; locale: Locale; growthProgress: number; growthEvidence: number; effects: ActiveVisualEffects; onSelect: () => void }) {
   const detailed = visualStyle === "detailed";
   const reducedMotion = useReducedMotion();
+  const group = useRef<THREE.Group>(null);
+  const invalidate = useThree((state) => state.invalidate);
+  const targetScale = (detailed ? 0.96 : 0.78) * Math.max(0.72, growthProgress);
+  const initialScale = useRef(targetScale);
+  const leafCount = (detailed ? 64 : 16) + Math.min(
+    detailed ? 48 : 12,
+    Math.floor(Math.log2(1 + Math.max(0, growthEvidence)) * (detailed ? 4 : 1.4)),
+  );
+  useEffect(() => {
+    if (reducedMotion && group.current) group.current.scale.setScalar(targetScale);
+    invalidate();
+  }, [invalidate, reducedMotion, targetScale]);
+  useFrame((_, delta) => {
+    if (!group.current || reducedMotion) return;
+    const current = group.current.scale.x;
+    if (Math.abs(current - targetScale) < 0.0005) {
+      group.current.scale.setScalar(targetScale);
+      return;
+    }
+    group.current.scale.setScalar(THREE.MathUtils.lerp(current, targetScale, 1 - Math.exp(-delta * 3.6)));
+    invalidate();
+  });
   const leafPositions = useMemo(() => {
     const points: Array<[number, number, number, number]> = [];
-    const count = detailed ? 64 : 16;
-    for (let index = 0; index < count; index += 1) {
+    for (let index = 0; index < leafCount; index += 1) {
       const angle = index * 2.399;
       const radius = detailed ? 1.05 + (index % 12) * 0.18 : 1.15 + (index % 4) * 0.32;
       points.push([
@@ -465,7 +488,7 @@ function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visu
       ]);
     }
     return points;
-  }, [detailed]);
+  }, [detailed, leafCount]);
   const leafSprigs = useMemo(() => detailed ? Array.from({ length: 18 }, (_, index) => {
     const angle = index * 2.399 + 0.62;
     const radius = 1.25 + (index % 10) * 0.22;
@@ -512,8 +535,9 @@ function Tree({ visualStyle, locale, growthProgress, effects, onSelect }: { visu
   );
   return (
     <group
+      ref={group}
       userData={{ interactionPriority: INTERACTION_PRIORITY.landmark }}
-      scale={(detailed ? 0.96 : 0.78) * (0.82 + Math.max(0, Math.min(1, growthProgress)) * 0.18)}
+      scale={initialScale.current}
       position={[0, 0, -0.2]}
       onClick={(event) => selectFromPointer(event, onSelect)}
       onPointerOver={() => { document.body.style.cursor = "pointer"; }}
@@ -1949,6 +1973,7 @@ function World(props: SceneProps & { cameraPanCommand: CameraPanCommand }) {
     props.selectedCardId,
     props.selectedStructureId,
     Math.round(props.growthProgress * 100),
+    Math.round(Math.log2(1 + Math.max(0, props.growthEvidence)) * 10),
   ].join(":");
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const effectDistance = useRef<EffectDistance>("far");
@@ -2087,7 +2112,7 @@ function World(props: SceneProps & { cameraPanCommand: CameraPanCommand }) {
           {props.backgroundMode === "detailed" && <Ground />}
           {props.backgroundMode === "detailed" && <AncientRuins glowEnabled={effects.glow} />}
           <Dome visualStyle={visualStyle} locale={props.locale} onSelect={() => props.onSelectStructure("canopy-shell")} />
-          <Tree visualStyle={visualStyle} locale={props.locale} growthProgress={props.growthProgress} effects={effects} onSelect={() => props.onSelectStructure("growth-tree")} />
+          <Tree visualStyle={visualStyle} locale={props.locale} growthProgress={props.growthProgress} growthEvidence={props.growthEvidence} effects={effects} onSelect={() => props.onSelectStructure("growth-tree")} />
           {props.backgroundMode === "detailed" && effects.glow && (
             <group position={[0, 5.05, -0.2]}>
               <mesh>

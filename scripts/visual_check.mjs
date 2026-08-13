@@ -242,9 +242,9 @@ async function prepare(page, { locale = "zh-TW", background = "detailed", lifeSt
     localStorage.setItem("canopy.music.volume", "0.88");
     localStorage.setItem("canopy.bgm", "on");
     localStorage.setItem("canopy.sfx", "on");
-    localStorage.setItem("canopy.life-stream", lifeStreamValue);
+    localStorage.setItem("canopy.fura-notebook", lifeStreamValue);
     localStorage.setItem("canopy.effects.master", effectsValue);
-    ["particles", "flow", "clouds", "glow", "motion"].forEach((key) => {
+    ["particles", "flow", "clouds", "glow", "motion", "fura"].forEach((key) => {
       localStorage.setItem(`canopy.effects.${key}`, !enabledEffectValues || enabledEffectValues.includes(key) ? "on" : "off");
     });
   }, { localeValue: locale, backgroundValue: background, lifeStreamValue: lifeStream, effectsValue: effects, enabledEffectValues: enabledEffects });
@@ -629,13 +629,23 @@ async function verifyPickingAndNavigation(page) {
   if (rotatedDetailTitle !== "Seed 大腦") failures.push(`rotated living-unit body selected ${rotatedDetailTitle || "nothing"}`);
 
   await prepare(page, { background: "detailed" });
-  await page.mouse.click(1210, 690);
-  await page.waitForTimeout(450);
-  const shellTitle = await page.locator(".detail-panel h2").innerText().catch(() => "");
-  if (shellTitle !== "Canopy 宿主") failures.push(`blank shell selected ${shellTitle || "nothing"}`);
+  const shellPoint = {
+    x: canvasBox.x + canvasBox.width * 0.625,
+    y: canvasBox.y + canvasBox.height * 0.767,
+  };
+  const shellPointElement = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.tagName ?? "", shellPoint);
+  let shellTitle = "";
+  if (shellPointElement !== "CANVAS") {
+    failures.push(`blank shell test point was occluded by ${shellPointElement || "nothing"}`);
+  } else {
+    await page.mouse.click(shellPoint.x, shellPoint.y);
+    await page.waitForTimeout(450);
+    shellTitle = await page.locator(".detail-panel h2").innerText().catch(() => "");
+    if (shellTitle !== "Canopy 宿主") failures.push(`blank shell selected ${shellTitle || "nothing"}`);
+  }
 
   await prepare(page, { background: "none" });
-  await page.mouse.click(1210, 690);
+  await page.mouse.click(shellPoint.x, shellPoint.y);
   await page.waitForTimeout(350);
   if (await page.locator(".detail-panel").count()) failures.push("blank no-background space selected a scene object");
 
@@ -803,6 +813,30 @@ async function verifyActivityAndTreatments(page) {
   const days = await timeline.getByRole("listitem").count();
   if (days !== 30) failures.push(`expected 30 activity days, got ${days}`);
   if ((await timeline.getByText("只顯示有限摘要", { exact: false }).count()) !== 1) failures.push("activity privacy boundary is not visible");
+  const latestGrowth = await page.locator(".scene-stage").evaluate((element) => ({
+    scale: Number(element.getAttribute("data-tree-maturity-scale")),
+    evidence: Number(element.getAttribute("data-tree-maturity-evidence")),
+  }));
+  if (days > 1) {
+    await clickControl(timeline.getByRole("listitem").first());
+    await page.waitForTimeout(120);
+  }
+  const earliestGrowth = await page.locator(".scene-stage").evaluate((element) => ({
+    scale: Number(element.getAttribute("data-tree-maturity-scale")),
+    evidence: Number(element.getAttribute("data-tree-maturity-evidence")),
+  }));
+  if (earliestGrowth.scale > latestGrowth.scale || earliestGrowth.evidence > latestGrowth.evidence) {
+    failures.push(`historical tree growth was not monotonic: ${JSON.stringify({ earliestGrowth, latestGrowth })}`);
+  }
+  await clickControl(timeline.getByRole("button", { name: "回到現在", exact: true }));
+  const restoredGrowth = await page.locator(".scene-stage").evaluate((element) => ({
+    scale: Number(element.getAttribute("data-tree-maturity-scale")),
+    evidence: Number(element.getAttribute("data-tree-maturity-evidence")),
+    stored: Number(localStorage.getItem("canopy.tree.maturity-evidence.v1")),
+  }));
+  if (restoredGrowth.scale < latestGrowth.scale || restoredGrowth.evidence < latestGrowth.evidence || restoredGrowth.stored < latestGrowth.evidence) {
+    failures.push(`current tree maturity shrank after history playback: ${JSON.stringify({ latestGrowth, restoredGrowth })}`);
+  }
 
   const dateLabel = timeline.locator(".timeline-date-row strong");
   const before = await dateLabel.innerText();
@@ -831,12 +865,43 @@ async function verifyActivityAndTreatments(page) {
   await page.locator(".recent-activity").waitFor({ state: "visible", timeout: 10000 });
 
   await prepare(page);
+  const closureSignal = page.getByRole("button", { name: /必要閉環失敗/ }).first();
+  let closureTreatmentVisible = false;
+  if (await closureSignal.count()) {
+    await clickControl(closureSignal);
+    const closureInspector = page.getByRole("dialog", { name: "健康異常詳情" });
+    await closureInspector.waitFor({ state: "visible", timeout: 10000 });
+    closureTreatmentVisible = await closureInspector.getByRole("button", { name: "改善後續回合的閉環", exact: true }).isVisible().catch(() => false);
+    if (!closureTreatmentVisible) failures.push("required lifecycle summary still has no canonical treatment route");
+    if (!await closureInspector.getByText("不會補造歷史證據", { exact: false }).count()) failures.push("closure treatment did not explain its truthful historical boundary");
+    if (!await closureInspector.getByText("可立即開始診斷與修正", { exact: true }).count()) failures.push("actionable closure issue still reports an unavailable handling state");
+    if (await closureInspector.getByText("Use reconciliation", { exact: false }).count()) failures.push("closure inspector leaked untranslated engineering instructions");
+    await clickControl(closureInspector.getByRole("button", { name: "關閉資訊", exact: true }));
+  }
+  let actionableIssueSurfaces = 0;
+  if (await closureSignal.count()) {
+    await clickControl(closureSignal);
+    const issueInspector = page.getByRole("dialog", { name: "健康異常詳情" });
+    await issueInspector.waitFor({ state: "visible", timeout: 10000 });
+    const issuePosition = await issueInspector.locator(".issue-inspector-controls span").innerText();
+    const issueTotal = Number(issuePosition.split("/")[1] || 0);
+    for (let index = 0; index < issueTotal; index += 1) {
+      const action = issueInspector.locator(".issue-treatment-command");
+      if (await action.isVisible().catch(() => false)) actionableIssueSurfaces += 1;
+      else failures.push(`issue ${index + 1}/${issueTotal} has no treatment or evidence recheck measure`);
+      if (index < issueTotal - 1) await clickControl(issueInspector.getByRole("button", { name: "下一項提醒", exact: true }));
+    }
+    await clickControl(issueInspector.getByRole("button", { name: "關閉資訊", exact: true }));
+  }
   await clickControl(page.getByRole("button", { name: "Seed 大腦", exact: true }));
   const brainPanel = page.locator(".detail-panel");
   await brainPanel.getByRole("heading", { name: "Seed 大腦", exact: true }).waitFor();
-  await clickControl(brainPanel.getByRole("button", { name: "診斷並治療這項問題", exact: true }));
+  await clickControl(brainPanel.getByRole("button", { name: "診斷並治療這項問題", exact: true }).first());
   const remediationDialog = page.getByRole("dialog", { name: "診斷與修正" });
   await remediationDialog.waitFor({ state: "visible", timeout: 10000 });
+  if (!await remediationDialog.getByRole("button", { name: /在這裡治療/ }).count()) {
+    failures.push("embedded treatment mode still uses technical interface wording");
+  }
   const modelSelect = remediationDialog.getByLabel("Codex 模型");
   const effortSelect = remediationDialog.getByLabel("推理強度");
   await modelSelect.locator("option").nth(1).waitFor({ state: "attached", timeout: 10000 }).catch(() => undefined);
@@ -856,7 +921,7 @@ async function verifyActivityAndTreatments(page) {
   await clickControl(page.getByRole("button", { name: "新增記憶提案", exact: true }));
   await page.getByRole("heading", { name: "提出新的 Seed 記憶", exact: true }).waitFor();
   await clickControl(page.getByRole("button", { name: "關閉", exact: true }));
-  return { days, before, previous, replayed, modelOptions, effortOptions, failures };
+  return { days, before, previous, replayed, latestGrowth, earliestGrowth, restoredGrowth, closureTreatmentVisible, actionableIssueSurfaces, modelOptions, effortOptions, failures };
 }
 
 async function verifyLifeStream(page) {
@@ -866,17 +931,15 @@ async function verifyLifeStream(page) {
   const panel = page.locator(".life-stream-panel");
   await panel.waitFor({ state: "visible", timeout: 15000 });
   await clickControl(panel.getByRole("button", { name: "收合生命歷程", exact: true }));
-  const desktopPeek = page.locator(".life-stream-peek");
-  await desktopPeek.waitFor({ state: "visible", timeout: 10000 });
+  const desktopFura = page.locator(".fura-companion");
+  await desktopFura.waitFor({ state: "visible", timeout: 10000 });
   await page.waitForTimeout(260);
-  const desktopPeekBounds = await desktopPeek.boundingBox();
-  if (!desktopPeekBounds || desktopPeekBounds.width > 50 || desktopPeekBounds.height <= desktopPeekBounds.width) {
-    failures.push("desktop life history did not collapse into a vertical edge tab");
+  const desktopFuraBounds = await desktopFura.boundingBox();
+  if ((await panel.count()) !== 0) failures.push("closed Fura notebook remained in the layout");
+  if (!desktopFuraBounds || desktopFuraBounds.x + desktopFuraBounds.width > 1440) {
+    failures.push("desktop Fura notebook control escapes the viewport");
   }
-  if (desktopPeekBounds && desktopPeekBounds.x + desktopPeekBounds.width > 1440) {
-    failures.push("desktop life history edge tab escapes the viewport");
-  }
-  await clickControl(desktopPeek);
+  await clickControl(desktopFura.getByRole("button", { name: "打開芙拉的記事本", exact: true }));
   await panel.waitFor({ state: "visible", timeout: 10000 });
   const eventCount = await panel.locator(".life-event").count();
   const privacyVisible = await panel.getByText("不保存原始 prompt", { exact: false }).isVisible();
@@ -901,7 +964,10 @@ async function verifyLifeStream(page) {
   if (apiContract.retentionDays !== 60) failures.push(`life event retention was ${apiContract.retentionDays}`);
   if (apiContract.containsRawToolInput) failures.push("life event API leaked raw tool input or response");
 
-  const inspectableTurn = panel.locator('.life-event[data-kind="turn_story"]').filter({ hasText: "完成" }).first();
+  // A live Core may currently have only blocked/running turns. Every turn story
+  // must expose the same evidence sections, so inspect the first real turn
+  // instead of coupling the UI contract to one translated status word.
+  const inspectableTurn = panel.locator('.life-event[data-kind="turn_story"]').first();
   await clickControl(inspectableTurn.locator(".life-event-main"));
   await page.waitForTimeout(350);
   const eventDetails = inspectableTurn.locator(".life-event-details");
@@ -909,6 +975,8 @@ async function verifyLifeStream(page) {
   const learningStatus = inspectableTurn.locator(".life-learning-status");
   const learningStatusVisible = await learningStatus.isVisible().catch(() => false);
   const learningStatusText = learningStatusVisible ? await learningStatus.innerText() : "";
+  const expandedPanelBounds = await panel.boundingBox();
+  const expandedVisibleEvents = await panel.locator('.life-event:visible').count();
   if (!eventDetailsVisible) failures.push("clicking a life event did not reveal its turn details");
   const storySections = eventDetailsVisible
     ? await eventDetails.locator("[data-section]").evaluateAll((elements) => elements.map((element) => element.getAttribute("data-section")))
@@ -919,23 +987,35 @@ async function verifyLifeStream(page) {
   if (!learningStatusVisible || !learningStatusText.includes("本回合學習判定")) {
     failures.push("life event details do not distinguish learning from ordinary completion");
   }
+  if (!expandedPanelBounds || expandedPanelBounds.width < 420 || expandedPanelBounds.height < 650) {
+    failures.push(`expanded Fura notebook is still too small for one event: ${JSON.stringify(expandedPanelBounds)}`);
+  }
+  if (expandedVisibleEvents !== 1) failures.push(`expanded Fura notebook retained ${expandedVisibleEvents} competing event rows`);
   const detail = page.locator(".detail-panel");
-  const desktopPeekWithDetail = page.locator(".life-stream-peek");
   await clickControl(panel.getByRole("button", { name: "收合生命歷程", exact: true }));
-  await desktopPeekWithDetail.waitFor({ state: "visible", timeout: 10000 });
+  await desktopFura.waitFor({ state: "visible", timeout: 10000 });
   await clickControl(page.getByRole("button", { name: "總覽", exact: true }));
   await page.waitForTimeout(1800);
   await clickControl(page.getByRole("button", { name: "Seed 大腦", exact: true }).first());
   await page.waitForTimeout(350);
   await detail.waitFor({ state: "visible", timeout: 10000 });
   const detailBounds = await detail.boundingBox();
-  const desktopPeekWithDetailBounds = await desktopPeekWithDetail.boundingBox();
+  const desktopFuraWithDetailBounds = await desktopFura.boundingBox();
+  const desktopFuraBubbleWithDetailBounds = await desktopFura.locator(".fura-guidance").boundingBox().catch(() => null);
+  const overlaps = (left, right) => Boolean(
+    left && right
+    && left.x < right.x + right.width
+    && left.x + left.width > right.x
+    && left.y < right.y + right.height
+    && left.y + left.height > right.y
+  );
   if (
     !detailBounds
-    || !desktopPeekWithDetailBounds
-    || desktopPeekWithDetailBounds.x + desktopPeekWithDetailBounds.width > detailBounds.x
+    || !desktopFuraWithDetailBounds
+    || overlaps(desktopFuraWithDetailBounds, detailBounds)
+    || overlaps(desktopFuraBubbleWithDetailBounds, detailBounds)
   ) {
-    failures.push("desktop life history edge tab overlaps selected-unit details");
+    failures.push("desktop Fura companion overlaps selected-unit details");
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -946,17 +1026,294 @@ async function verifyLifeStream(page) {
     failures.push("narrow life history escapes the viewport");
   }
   await clickControl(narrowPanel.getByRole("button", { name: "收合生命歷程", exact: true }));
-  const peek = page.locator(".life-stream-peek");
-  await peek.waitFor({ state: "visible", timeout: 10000 });
-  const peekBounds = await peek.boundingBox();
-  if (!peekBounds || peekBounds.x < 0 || peekBounds.x + peekBounds.width > 390) failures.push("narrow life history summary escapes the viewport");
-  if (narrowBounds && peekBounds && Math.abs(narrowBounds.width - peekBounds.width) > 2) failures.push("life history collapsed sideways instead of vertically");
-  if (narrowBounds && peekBounds && peekBounds.height >= narrowBounds.height) failures.push("life history vertical collapse did not reduce its height");
-  await clickOrganBody(page, "Seed 大腦", 390);
+  const narrowFura = page.locator(".fura-companion");
+  await narrowFura.waitFor({ state: "visible", timeout: 10000 });
+  const narrowFuraBounds = await narrowFura.boundingBox();
+  if (!narrowFuraBounds || narrowFuraBounds.x < 0 || narrowFuraBounds.x + narrowFuraBounds.width > 390) {
+    failures.push("narrow Fura notebook control escapes the viewport");
+  }
+  if ((await narrowPanel.count()) !== 0) failures.push("narrow notebook did not fully collapse back into Fura");
+  // This stage verifies that collapsing the notebook returns interaction to the
+  // scene. Body raycasting across all modes/viewports is covered separately by
+  // verifyPickingAndNavigation, so use the projected scene label here to avoid
+  // coupling this assertion to a second camera-coordinate calculation.
+  await page.getByRole("button", { name: "Seed 大腦", exact: true }).click();
   await page.waitForTimeout(350);
   const narrowSelection = await page.locator(".detail-panel h2").innerText().catch(() => "");
   if (narrowSelection !== "Seed 大腦") failures.push(`collapsed narrow life history prevented 3D selection: ${narrowSelection || "nothing"}`);
-  return { desktopPeekBounds, desktopPeekWithDetailBounds, eventCount, retentionCopy, apiContract, eventDetailsVisible, learningStatusVisible, learningStatusText, narrowSelection, failures };
+  return { desktopFuraBounds, desktopFuraWithDetailBounds, desktopFuraBubbleWithDetailBounds, eventCount, retentionCopy, apiContract, eventDetailsVisible, learningStatusVisible, learningStatusText, expandedPanelBounds, expandedVisibleEvents, narrowFuraBounds, narrowSelection, failures };
+}
+
+async function verifyFuraCompanion(page) {
+  const failures = [];
+  await page.goto("about:blank");
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
+  await page.evaluate(() => localStorage.removeItem("canopy.fura.position.v1"));
+  const intersects = (left, right) => Boolean(
+    left && right
+    && left.x < right.x + right.width
+    && left.x + left.width > right.x
+    && left.y < right.y + right.height
+    && left.y + left.height > right.y
+  );
+  const rectangleGap = (left, right) => {
+    if (!left || !right) return Number.POSITIVE_INFINITY;
+    const horizontal = Math.max(left.x - (right.x + right.width), right.x - (left.x + left.width), 0);
+    const vertical = Math.max(left.y - (right.y + right.height), right.y - (left.y + left.height), 0);
+    return Math.hypot(horizontal, vertical);
+  };
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await prepare(page, { background: "simple", effects: "on", enabledEffects: ["fura"] });
+  const companion = page.locator(".fura-companion");
+  await companion.waitFor({ state: "visible", timeout: 15000 });
+  const restartFuraMotion = async () => {
+    // Keep the synthetic pointer away from Fura's roaming corridor. Hovering
+    // her intentionally freezes motion so a real operator can click or drag.
+    await page.mouse.move(2, 2);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 });
+    await companion.waitFor({ state: "visible", timeout: 15000 });
+    // The guidance response restarts Fura's first notebook-to-walk sequence.
+    // Begin sampling from that contract-backed state instead of relying on an
+    // arbitrary scene-settle delay that can miss the outward walk.
+    await companion.locator(".fura-guidance").waitFor({ state: "visible", timeout: 10000 });
+  };
+  await restartFuraMotion();
+  // Initial layout collision resolution can restart the first idle sequence.
+  // Begin the gait assertions only after an actual walking step starts instead
+  // of assuming a fixed wall-clock offset from page load.
+  await page.waitForFunction(() => document.querySelector(".fura-companion")?.getAttribute("data-roaming") === "true", null, { timeout: 20000 });
+  const collapsedBubble = companion.locator(".fura-guidance");
+  const heartbeatMetrics = await companion.locator(".fura-heartbeat").evaluate((element) => {
+    const heart = element.getBoundingClientRect();
+    const character = element.parentElement?.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      xRatio: character ? (heart.x + heart.width / 2 - character.x) / character.width : 0,
+      yRatio: character ? (heart.y + heart.height / 2 - character.y) / character.height : 0,
+      animationName: style.animationName,
+      mixBlendMode: style.mixBlendMode,
+    };
+  });
+  if (heartbeatMetrics.xRatio < 0.39 || heartbeatMetrics.xRatio > 0.57 || heartbeatMetrics.yRatio < 0.63 || heartbeatMetrics.yRatio > 0.78) {
+    failures.push(`Fura heartbeat glow is not aligned with her chest heart: ${JSON.stringify(heartbeatMetrics)}`);
+  }
+  if (!heartbeatMetrics.animationName.includes("fura-heartbeat") || heartbeatMetrics.mixBlendMode !== "screen") {
+    failures.push(`Fura chest heart does not use the intended lightweight glow: ${JSON.stringify(heartbeatMetrics)}`);
+  }
+  const collapsedBubbleBounds = await collapsedBubble.boundingBox();
+  const collapsedBubbleText = (await collapsedBubble.innerText()).trim();
+  if (await companion.getAttribute("data-guidance-expanded") !== "false") failures.push("narrow Fura guidance did not start collapsed");
+  if (!collapsedBubbleBounds || collapsedBubbleBounds.width > 48 || collapsedBubbleBounds.height > 48) {
+    failures.push(`collapsed Fura guidance still occupies a row: ${JSON.stringify(collapsedBubbleBounds)}`);
+  }
+  if (collapsedBubbleText !== "…") failures.push(`collapsed Fura guidance showed ${JSON.stringify(collapsedBubbleText)} instead of an ellipsis`);
+  const guidanceTail = companion.locator(".fura-guidance-tail");
+  const guidanceTailBounds = await guidanceTail.boundingBox().catch(() => null);
+  const guidanceTailSide = await guidanceTail.getAttribute("data-side").catch(() => null);
+  const bubblePlacement = await companion.getAttribute("data-bubble-placement");
+  if (!guidanceTailBounds || !["left", "right", "above", "below"].includes(guidanceTailSide ?? "")) {
+    failures.push(`Fura guidance is missing its manga speech-bubble tail: ${guidanceTailSide ?? "none"}`);
+  }
+  if (guidanceTailSide !== bubblePlacement) failures.push(`Fura guidance tail points ${guidanceTailSide} while its bubble is placed ${bubblePlacement}`);
+  const poses = [];
+  const movementSamples = [];
+  const bubbleMovementSamples = [];
+  const bubbleGaps = [];
+  const bubbleOffsets = [];
+  const spriteAnimations = [];
+  const storedBeforeRoam = await page.evaluate(() => localStorage.getItem("canopy.fura.position.v1"));
+  for (let index = 0; index < 32; index += 1) {
+    poses.push(await companion.getAttribute("data-pose"));
+    const bounds = await companion.locator(".fura-character-button").boundingBox();
+    const roamBounds = await companion.locator(".fura-roam-layer").boundingBox();
+    const movingBubbleBounds = await collapsedBubble.boundingBox();
+    if (bounds) movementSamples.push({ x: bounds.x, y: bounds.y });
+    if (movingBubbleBounds) bubbleMovementSamples.push({ x: movingBubbleBounds.x, y: movingBubbleBounds.y });
+    if (bounds && movingBubbleBounds) {
+      bubbleGaps.push(rectangleGap(bounds, movingBubbleBounds));
+    }
+    // Compare the bubble to Fura's shared roaming layer. Her character button
+    // intentionally bobs, stretches, and sits inside that layer, which should
+    // not be mistaken for the attached bubble drifting away.
+    if (roamBounds && movingBubbleBounds) {
+      bubbleOffsets.push({ x: movingBubbleBounds.x - roamBounds.x, y: movingBubbleBounds.y - roamBounds.y });
+    }
+    spriteAnimations.push(await companion.locator(".fura-sprite").evaluate((element) => getComputedStyle(element).animationName));
+    await page.waitForTimeout(250);
+  }
+  const displacement = movementSamples.reduce((maximum, sample) => (
+    Math.max(maximum, ...movementSamples.map((candidate) => Math.hypot(candidate.x - sample.x, candidate.y - sample.y)))
+  ), 0);
+  const distinctPositions = new Set(movementSamples.map((sample) => `${Math.round(sample.x / 3)}:${Math.round(sample.y / 3)}`)).size;
+  const largestSampleStep = movementSamples.slice(1).reduce((maximum, sample, index) => (
+    Math.max(maximum, Math.hypot(sample.x - movementSamples[index].x, sample.y - movementSamples[index].y))
+  ), 0);
+  const bubbleDisplacement = bubbleMovementSamples.reduce((maximum, sample) => (
+    Math.max(maximum, ...bubbleMovementSamples.map((candidate) => Math.hypot(candidate.x - sample.x, candidate.y - sample.y)))
+  ), 0);
+  const maximumBubbleGap = Math.max(0, ...bubbleGaps);
+  const bubbleOffsetDrift = bubbleOffsets.reduce((maximum, sample) => (
+    Math.max(maximum, ...bubbleOffsets.map((candidate) => Math.hypot(candidate.x - sample.x, candidate.y - sample.y)))
+  ), 0);
+  const storedAfterRoam = await page.evaluate(() => localStorage.getItem("canopy.fura.position.v1"));
+  if (!poses.includes("walk-left") || !poses.includes("walk-right")) {
+    failures.push(`Fura did not visibly walk during the initial motion window: ${[...new Set(poses)].join(", ")}`);
+  }
+  if (displacement < 24 || distinctPositions < 5) {
+    failures.push(`Fura motion was not spatially continuous (${displacement.toFixed(1)}px across ${distinctPositions} positions)`);
+  }
+  if (largestSampleStep > 42) failures.push(`Fura movement jumped ${largestSampleStep.toFixed(1)}px between samples`);
+  if (bubbleMovementSamples.length !== movementSamples.length || bubbleDisplacement < 20) {
+    failures.push(`Fura's collapsed speech bubble did not travel with her (${bubbleDisplacement.toFixed(1)}px)`);
+  }
+  if (maximumBubbleGap > 4 || bubbleOffsetDrift > 4) {
+    failures.push(`Fura's collapsed speech bubble drifted away (${maximumBubbleGap.toFixed(1)}px gap, ${bubbleOffsetDrift.toFixed(1)}px relative drift)`);
+  }
+  if (!spriteAnimations.some((name) => name.includes("fura-walk"))) failures.push("Fura walked without a multi-frame gait animation");
+  if (storedAfterRoam !== storedBeforeRoam) failures.push("automatic Fura motion overwrote the operator's parked position");
+  if (await companion.getAttribute("data-motion") !== "active") failures.push("Fura motion was not active when only her effect was enabled");
+  if (await companion.locator(".fura-drag-hint").count()) failures.push("Fura still rendered a visible drag symbol");
+
+  await clickControl(collapsedBubble.getByRole("button", { name: "展開芙拉的訊息", exact: true }));
+  await page.waitForTimeout(220);
+  const expandedBubbleBounds = await collapsedBubble.boundingBox();
+  if (await companion.getAttribute("data-guidance-expanded") !== "true") failures.push("Fura guidance did not expand from the speech bubble");
+  if (!expandedBubbleBounds || expandedBubbleBounds.width < 160 || expandedBubbleBounds.height <= 48) {
+    failures.push(`expanded Fura guidance did not become a readable manga bubble: ${JSON.stringify(expandedBubbleBounds)}`);
+  }
+  if (!(await guidanceTail.boundingBox().catch(() => null))) failures.push("expanded Fura guidance lost its speech-bubble tail");
+  await clickControl(collapsedBubble.getByRole("button", { name: "收合芙拉的訊息", exact: true }));
+  await page.waitForTimeout(180);
+
+  // Start a fresh deterministic first sequence before testing interruption;
+  // the sampling window above legitimately finishes that first walk.
+  await restartFuraMotion();
+  await page.waitForFunction(() => document.querySelector(".fura-companion")?.getAttribute("data-roaming") === "true", null, { timeout: 12000 });
+  const movingBounds = await companion.locator(".fura-character-button").boundingBox();
+  if (movingBounds) {
+    await page.mouse.move(movingBounds.x + movingBounds.width / 2, movingBounds.y + movingBounds.height / 2);
+    await page.waitForTimeout(180);
+  }
+  const hoverStoppedAt = await companion.locator(".fura-character-button").boundingBox();
+  await page.waitForTimeout(650);
+  const hoverStoppedLater = await companion.locator(".fura-character-button").boundingBox();
+  if (!hoverStoppedAt || !hoverStoppedLater || Math.hypot(hoverStoppedLater.x - hoverStoppedAt.x, hoverStoppedLater.y - hoverStoppedAt.y) > 2) {
+    failures.push("Fura did not stop smoothly when the operator hovered to interact");
+  }
+  await page.mouse.move(4, 4);
+  await page.waitForTimeout(180);
+
+  const beforeDrag = await companion.locator(".fura-character-button").boundingBox();
+  if (beforeDrag) {
+    await page.mouse.move(beforeDrag.x + beforeDrag.width / 2, beforeDrag.y + beforeDrag.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(beforeDrag.x + beforeDrag.width / 2 - 80, beforeDrag.y + beforeDrag.height / 2 - 72, { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(600);
+  }
+  const afterDrag = await companion.locator(".fura-character-button").boundingBox();
+  const storedPosition = await page.evaluate(() => localStorage.getItem("canopy.fura.position.v1"));
+  if (!beforeDrag || !afterDrag || Math.hypot(afterDrag.x - beforeDrag.x, afterDrag.y - beforeDrag.y) < 35) {
+    failures.push("dragging Fura did not move her character");
+  }
+  if ((await page.locator(".life-stream-panel").count()) !== 0) failures.push("dragging Fura accidentally opened her notebook");
+  if (!storedPosition) failures.push("Fura position was not saved after drop");
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 });
+  await companion.waitFor({ state: "visible", timeout: 15000 });
+  const afterReload = await companion.boundingBox();
+  if (!afterDrag || !afterReload || Math.hypot(afterReload.x - afterDrag.x, afterReload.y - afterDrag.y) > 4) {
+    failures.push("Fura did not restore her saved position after reload");
+  }
+
+  const characterBounds = await companion.locator(".fura-character-button").boundingBox();
+  const bubbleBounds = await companion.locator(".fura-guidance").boundingBox().catch(() => null);
+  const cameraBounds = await page.locator(".camera-pan-controls").boundingBox();
+  const hudBounds = await page.locator(".bottom-hud").boundingBox();
+  if (!characterBounds || characterBounds.width < 44 || characterBounds.height < 44) failures.push("Fura character control is smaller than 44px");
+  if (intersects(characterBounds, cameraBounds) || intersects(characterBounds, hudBounds)) failures.push("narrow Fura character overlaps camera controls or bottom HUD");
+  if (intersects(bubbleBounds, cameraBounds) || intersects(bubbleBounds, hudBounds)) failures.push("narrow Fura guidance overlaps camera controls or bottom HUD");
+
+  const guidanceActions = companion.locator(".fura-guidance-actions button:visible");
+  for (let index = 0; index < await guidanceActions.count(); index += 1) {
+    const bounds = await guidanceActions.nth(index).boundingBox();
+    if (!bounds || bounds.width < 44 || bounds.height < 44) failures.push("a Fura guidance action is smaller than 44px");
+  }
+
+  await clickControl(companion.getByRole("button", { name: "打開芙拉的記事本", exact: true }));
+  const notebook = page.locator(".life-stream-panel");
+  await notebook.waitFor({ state: "visible", timeout: 10000 });
+  // Bounding boxes are temporarily scaled by the 220ms notebook-open
+  // animation. Measure the settled touch targets, not an in-between frame.
+  await page.waitForTimeout(300);
+  const notebookTargetMetrics = await notebook
+    .locator(".life-heading-actions .icon-button, .life-filters button, .life-stream-footer button")
+    .evaluateAll((elements) => elements.flatMap((element) => {
+      const style = getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || bounds.width <= 0 || bounds.height <= 0) return [];
+      return [{ width: bounds.width, height: bounds.height }];
+    }));
+  for (const bounds of notebookTargetMetrics) {
+    // Chromium can report an authored 44px target as 43.999... after device
+    // scaling. Round CSS pixels so a subpixel float does not become a false
+    // accessibility failure; a genuinely smaller target still fails.
+    if (Math.round(bounds.width) < 44 || Math.round(bounds.height) < 44) failures.push("a Fura notebook action is smaller than 44px");
+  }
+  await clickControl(notebook.getByRole("button", { name: "收合生命歷程", exact: true }));
+
+  await clickControl(page.getByRole("button", { name: "歷程", exact: true }));
+  await page.locator(".activity-timeline").waitFor({ state: "visible", timeout: 10000 });
+  if ((await page.locator(".fura-companion").count()) !== 0) failures.push("Fura remained visible over the narrow activity timeline");
+
+  await prepare(page, { background: "simple", effects: "off" });
+  const pausedByMaster = await page.locator(".fura-companion").getAttribute("data-motion");
+  if (pausedByMaster !== "paused") failures.push("Fura did not pause with the visual-effects master off");
+
+  await prepare(page, { background: "simple", effects: "on", enabledEffects: ["motion"] });
+  const pausedIndividually = await page.locator(".fura-companion").getAttribute("data-motion");
+  if (pausedIndividually !== "paused") failures.push("Fura did not pause when her individual effect was off");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await prepare(page, { background: "simple", effects: "on", enabledEffects: ["fura"] });
+  const pausedForReducedMotion = await page.locator(".fura-companion").getAttribute("data-motion");
+  if (pausedForReducedMotion !== "paused") failures.push("Fura ignored prefers-reduced-motion");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
+  return {
+    poses: [...new Set(poses)],
+    displacement,
+    distinctPositions,
+    largestSampleStep,
+    bubbleDisplacement,
+    maximumBubbleGap,
+    bubbleOffsetDrift,
+    spriteAnimations: [...new Set(spriteAnimations)],
+    storedBeforeRoam,
+    storedAfterRoam,
+    hoverStoppedAt,
+    hoverStoppedLater,
+    beforeDrag,
+    afterDrag,
+    afterReload,
+    storedPosition,
+    characterBounds,
+    bubbleBounds,
+    collapsedBubbleBounds,
+    collapsedBubbleText,
+    expandedBubbleBounds,
+    guidanceTailBounds,
+    guidanceTailSide,
+    heartbeatMetrics,
+    cameraBounds,
+    hudBounds,
+    notebookTargetMetrics,
+    pausedByMaster,
+    pausedIndividually,
+    pausedForReducedMotion,
+    failures,
+  };
 }
 
 async function inspect(page, name, viewport, { enterSeed = false, enterTimeline = false, background = "detailed" } = {}) {
@@ -1054,6 +1411,7 @@ try {
   const picking = await runStage("picking-navigation", () => verifyPickingAndNavigation(page));
   const activity = await runStage("activity", () => verifyActivityAndTreatments(page));
   const lifeStream = await runStage("life-stream", () => verifyLifeStream(page));
+  const fura = await runStage("fura", () => verifyFuraCompanion(page));
   const scenes = [
     ["desktop-detailed", { width: 1440, height: 900 }, { background: "detailed" }],
     ["desktop-simple", { width: 1440, height: 900 }, { background: "simple" }],
@@ -1076,9 +1434,10 @@ try {
     ...picking.failures.map((failure) => `picking-navigation: ${failure}`),
     ...activity.failures.map((failure) => `activity: ${failure}`),
     ...lifeStream.failures.map((failure) => `life-stream: ${failure}`),
+    ...fura.failures.map((failure) => `fura: ${failure}`),
     ...runtimeErrors,
   ];
-  console.log(JSON.stringify({ status: failures.length ? "FAIL" : "PASS", renderBudget, zoom, controls, musicLayout, cameraPan, picking, activity, lifeStream, results, failures }, null, 2));
+  console.log(JSON.stringify({ status: failures.length ? "FAIL" : "PASS", renderBudget, zoom, controls, musicLayout, cameraPan, picking, activity, lifeStream, fura, results, failures }, null, 2));
   if (failures.length) process.exitCode = 1;
 } finally {
   await browser.close();

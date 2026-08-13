@@ -31,11 +31,21 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { fetchLifeEventRevision, fetchLifeEvents, fetchSnapshot, fetchSnapshotRevision, syncSnapshot } from "./api";
+import {
+  answerFuraGuidance,
+  decideFuraGuidance,
+  fetchFuraGuidance,
+  fetchLifeEventRevision,
+  fetchLifeEvents,
+  fetchSnapshot,
+  fetchSnapshotRevision,
+  syncSnapshot,
+} from "./api";
 import { AmbientBgm, ambientTrackInfo, playUiClick, type AmbientTrackId } from "./audio/ambientBgm";
 import { CanopyScene, type EffectDistance, type VisualEffects } from "./components/CanopyScene";
 import { ActivityTimeline } from "./components/ActivityTimeline";
 import { EvolutionLab } from "./components/EvolutionLab";
+import { FuraCompanion } from "./components/FuraCompanion";
 import { IssueTreatmentPanel } from "./components/IssueTreatmentPanel";
 import { LifeStreamPanel } from "./components/LifeStreamPanel";
 import { TreatmentComposer } from "./components/TreatmentComposer";
@@ -46,6 +56,7 @@ import {
   localizedCategory,
   localizedDimension,
   localizedIssueDetail,
+  localizedIssueEvidence,
   localizedIssueTitle,
   localizedLifecycle,
   localizedSource,
@@ -58,7 +69,22 @@ import {
   t,
   type Locale,
 } from "./i18n";
-import type { ActivityEvent, ActivityProjection, CanopyConnection, CanopyIssue, CanopySnapshot, HealthStatus, LifeEventsResponse, ModuleHealth, SeedCard, SnapshotSyncState, StructureNode, TreatmentTarget } from "./types";
+import type {
+  ActivityEvent,
+  ActivityProjection,
+  CanopyConnection,
+  CanopyIssue,
+  CanopySnapshot,
+  FuraGuidanceMessage,
+  FuraGuidanceResponse,
+  HealthStatus,
+  LifeEventsResponse,
+  ModuleHealth,
+  SeedCard,
+  SnapshotSyncState,
+  StructureNode,
+  TreatmentTarget,
+} from "./types";
 import { eventPayloadRevision } from "./lifeStories";
 
 type BackgroundMode = "detailed" | "simple" | "none";
@@ -93,7 +119,9 @@ const MODULE_ICONS: Record<string, typeof BrainCircuit> = {
 
 const LOCALES: Locale[] = ["zh-TW", "zh-CN", "en"];
 const BACKGROUNDS: BackgroundMode[] = ["detailed", "simple", "none"];
-const VISUAL_EFFECT_KEYS: VisualEffectKey[] = ["particles", "flow", "clouds", "glow", "motion"];
+const VISUAL_EFFECT_KEYS: VisualEffectKey[] = ["particles", "flow", "clouds", "glow", "motion", "fura"];
+const VISUAL_EFFECT_PROFILE_KEY = "canopy.effects.profile.fura-motion-v2";
+const TREE_MATURITY_STORAGE_KEY = "canopy.tree.maturity-evidence.v1";
 const MUSIC_TRACKS: AmbientTrackId[] = [
   "sacred-grove",
   "sakuya4",
@@ -181,16 +209,40 @@ function storedToggle(key: string, fallback: boolean): boolean {
   return fallback;
 }
 
+function storedTreeMaturityEvidence(): number {
+  const stored = Number(window.localStorage.getItem(TREE_MATURITY_STORAGE_KEY));
+  return Number.isFinite(stored) && stored >= 0 ? Math.floor(stored) : 0;
+}
+
 function storedVisualEffects(): VisualEffects {
+  const savedProfile = window.localStorage.getItem(VISUAL_EFFECT_PROFILE_KEY);
+  const legacyQuietProfile = savedProfile === null
+    && window.localStorage.getItem("canopy.effects.master") === "off"
+    && VISUAL_EFFECT_KEYS.every((key) => window.localStorage.getItem(`canopy.effects.${key}`) === "on");
+  if (legacyQuietProfile) {
+    // Migrate the previous development default (master off + every child on)
+    // to a low-cost profile where only Fura moves. A later explicit master-off
+    // remains authoritative because the profile marker prevents re-migration.
+    return {
+      master: true,
+      particles: false,
+      flow: false,
+      clouds: false,
+      glow: false,
+      motion: false,
+      fura: true,
+    };
+  }
   return {
-    // New browsers and development sessions start quiet. Individual choices
-    // remain ready so enabling the master restores the full scene in one step.
-    master: storedToggle("canopy.effects.master", false),
-    particles: storedToggle("canopy.effects.particles", true),
-    flow: storedToggle("canopy.effects.flow", true),
-    clouds: storedToggle("canopy.effects.clouds", true),
-    glow: storedToggle("canopy.effects.glow", true),
-    motion: storedToggle("canopy.effects.motion", true),
+    // New browsers start with one compositor-only companion animation. Heavy
+    // 3D scene effects stay off until the operator chooses them.
+    master: storedToggle("canopy.effects.master", true),
+    particles: storedToggle("canopy.effects.particles", false),
+    flow: storedToggle("canopy.effects.flow", false),
+    clouds: storedToggle("canopy.effects.clouds", false),
+    glow: storedToggle("canopy.effects.glow", false),
+    motion: storedToggle("canopy.effects.motion", false),
+    fura: storedToggle("canopy.effects.fura", true),
   };
 }
 
@@ -226,52 +278,93 @@ function issueState(locale: Locale, issue: CanopyIssue): string {
   return localized === `issue_state.${state}` ? state : localized;
 }
 
+function remediationRouteForIssue(issue: CanopyIssue, issues: CanopyIssue[]): CanopyIssue | undefined {
+  if (issue.id && issue.remediation?.requestable === true) return issue;
+  if (issue.code === "required_lifecycle_failures") {
+    return issues.find((candidate) => (
+      candidate.id === "execution-gap:required-lifecycle"
+      && candidate.remediation?.requestable === true
+    ));
+  }
+  return undefined;
+}
+
 function IssueInspector({
   issue,
+  issues,
   locale,
   position,
   count,
   onPrevious,
   onNext,
   onTreat,
+  onRecheck,
   onClose,
 }: {
   issue: CanopyIssue;
+  issues: CanopyIssue[];
   locale: Locale;
   position: number;
   count: number;
   onPrevious: () => void;
   onNext: () => void;
-  onTreat: () => void;
+  onTreat: (issue: CanopyIssue) => void;
+  onRecheck: () => void;
   onClose: () => void;
 }) {
-  const rawVerification = typeof issue.verification === "string"
-    ? issue.verification
-    : issue.verification?.summary || issue.verification?.status || issue.remediation?.verification;
+  const treatmentRoute = remediationRouteForIssue(issue, issues);
+  const remediationIssue = treatmentRoute ?? issue;
+  const rawVerification = typeof remediationIssue.verification === "string"
+    ? remediationIssue.verification
+    : remediationIssue.verification?.summary
+      || remediationIssue.verification?.status
+      || remediationIssue.remediation?.verification;
   const verification = rawVerification === "observe one real PreToolUse/PostToolUse pair"
     ? t(locale, "issue_verification.real_tool_pair")
     : rawVerification === "canopy doctor --json"
       ? t(locale, "issue_verification.doctor")
       : rawVerification?.startsWith("Re-run Seed health and confirm")
         ? t(locale, "issue_verification.seed_operator_review")
+        : rawVerification === "Re-evaluate the same stable finding from its owning evidence source."
+          ? t(locale, "issue_verification.recheck_owning_evidence")
         : rawVerification;
-  const actionId = issue.remediation?.action_id;
+  const actionId = remediationIssue.remediation?.action_id;
   const localizedAction = actionId ? t(locale, `issue_action.${actionId}`) : "";
-  const action = issue.remediation?.summary
+  const rawAction = remediationIssue.remediation?.summary
     || (localizedAction && localizedAction !== `issue_action.${actionId}` ? localizedAction : "")
-    || issue.remediation?.next_action
-    || issue.remediation?.command;
-  const automatic = issue.remediation?.automatic === true || issue.remediation?.mode === "auto_safe";
-  const requiresOperator = issue.requires_operator === true
-    || issue.remediation?.mode === "operator_required"
-    || issue.remediation?.state === "needs_operator"
-    || issue.state === "needs_operator";
+    || remediationIssue.remediation?.next_action
+    || remediationIssue.remediation?.command;
+  const action = rawAction?.startsWith("Use reconciliation to distinguish missing evidence")
+    ? t(locale, "issue_action.repair_future_closure")
+    : rawAction;
+  const automatic = remediationIssue.remediation?.automatic === true || remediationIssue.remediation?.mode === "auto_safe";
+  const requiresOperator = remediationIssue.requires_operator === true
+    || remediationIssue.remediation?.mode === "operator_required"
+    || remediationIssue.remediation?.state === "needs_operator"
+    || remediationIssue.state === "needs_operator";
   const detail = issue.code === "doctor_runtime_verification_pending"
     ? t(locale, "issue_detail.doctor_runtime_pending_detail")
     : issue.id === "review-pressure:due-cards"
       ? t(locale, "issue_detail.seed_review_due_cards_detail")
       : localizedIssueDetail(locale, issue);
-  const requestable = issue.remediation?.requestable === true;
+  const relatedClosureIssue = issue.code === "required_lifecycle_failures"
+    ? issues.find((candidate) => candidate.id === "execution-gap:required-lifecycle")
+    : undefined;
+  const automaticVerification = issue.code === "doctor_runtime_verification_pending"
+    || remediationIssue.remediation?.state === "awaiting_runtime_verification";
+  const stateLabel = treatmentRoute
+    ? t(locale, "issue_detail.state_actionable")
+    : issueState(locale, remediationIssue);
+  const automaticLabel = automatic
+    ? t(locale, "issue_detail.automatic_yes")
+    : treatmentRoute
+      ? t(locale, "issue_detail.manual_start")
+      : automaticVerification
+        ? t(locale, "issue_detail.automatic_verification")
+        : requiresOperator
+          ? t(locale, "issue_detail.needs_operator")
+          : t(locale, "issue_detail.automatic_unreported");
+  const evidence = [...new Set([...(issue.evidence || []), ...(relatedClosureIssue?.evidence || [])])];
   return (
     <section className="issue-inspector" role="dialog" aria-label={t(locale, "issue_detail.title")}>
       <header>
@@ -289,15 +382,22 @@ function IssueInspector({
       <h2>{localizedIssueTitle(locale, issue)}</h2>
       <p>{detail}</p>
       <dl>
-        <div><dt>{t(locale, "issue_detail.state")}</dt><dd>{issueState(locale, issue)}</dd></div>
-        <div><dt>{t(locale, "issue_detail.automatic")}</dt><dd>{automatic ? t(locale, "issue_detail.automatic_yes") : requiresOperator ? t(locale, "issue_detail.needs_operator") : t(locale, "issue_detail.automatic_unreported")}</dd></div>
+        <div><dt>{t(locale, "issue_detail.state")}</dt><dd>{stateLabel}</dd></div>
+        <div><dt>{t(locale, "issue_detail.automatic")}</dt><dd>{automaticLabel}</dd></div>
         {action && <div><dt>{t(locale, "issue_detail.action")}</dt><dd>{action}</dd></div>}
         {verification && <div><dt>{t(locale, "issue_detail.verification")}</dt><dd>{verification}</dd></div>}
-        {issue.case_id && <div><dt>{t(locale, "issue_detail.case")}</dt><dd>{issue.case_id}</dd></div>}
+        {evidence.length > 0 && <div><dt>{t(locale, "issue_detail.evidence")}</dt><dd><ul>{evidence.map((item, index) => <li key={`${index}:${item}`}>{localizedIssueEvidence(locale, item)}</li>)}</ul></dd></div>}
+        {(remediationIssue.case_id || issue.case_id) && <div><dt>{t(locale, "issue_detail.case")}</dt><dd>{remediationIssue.case_id || issue.case_id}</dd></div>}
       </dl>
-      {issue.id && requestable
-        ? <button className="issue-treatment-command" onClick={onTreat}><Stethoscope size={16} />{t(locale, "issue_detail.treat")}</button>
-        : <p className="issue-treatment-unavailable">{t(locale, "issue_detail.not_requestable")}</p>}
+      {treatmentRoute
+        ? <>
+          <button className="issue-treatment-command" onClick={() => onTreat(treatmentRoute)}><Stethoscope size={16} />{t(locale, issue.code === "required_lifecycle_failures" ? "issue_detail.treat_future_closure" : "issue_detail.treat")}</button>
+          {issue.code === "required_lifecycle_failures" && <p className="issue-treatment-scope">{t(locale, "issue_detail.future_closure_scope")}</p>}
+        </>
+        : <>
+          <p className="issue-treatment-unavailable">{t(locale, automaticVerification ? "issue_detail.automatic_followup" : "issue_detail.not_requestable")}</p>
+          <button className="issue-treatment-command issue-recheck-command" onClick={onRecheck}><RefreshCw size={16} />{t(locale, "issue_detail.recheck")}</button>
+        </>}
     </section>
   );
 }
@@ -791,6 +891,7 @@ function SettingsPanel({
         clouds: false,
         glow: false,
         motion: false,
+        fura: false,
       };
       isolated[key] = true;
       onVisualEffects(isolated);
@@ -999,7 +1100,7 @@ export default function App() {
   const [selectedActivityDate, setSelectedActivityDate] = useState("");
   const [activityPlaying, setActivityPlaying] = useState(false);
   const [lifeStreamOpen, setLifeStreamOpen] = useState(
-    () => window.localStorage.getItem("canopy.life-stream") !== "closed",
+    () => window.localStorage.getItem("canopy.fura-notebook") === "open",
   );
   const [lifeEvents, setLifeEvents] = useState<ActivityEvent[]>([]);
   const [lifeStats, setLifeStats] = useState<LifeEventsResponse["stats"]>({ total: 0, oldest: "", newest: "" });
@@ -1013,6 +1114,9 @@ export default function App() {
     truncated: false,
     omitted: {},
   });
+  const [furaGuidance, setFuraGuidance] = useState<FuraGuidanceResponse | null>(null);
+  const [furaBusy, setFuraBusy] = useState(false);
+  const [treeMaturityEvidence, setTreeMaturityEvidence] = useState(storedTreeMaturityEvidence);
   const bgm = useRef<AmbientBgm | null>(null);
   const lifeRevision = useRef("");
   const snapshotGeneratedAt = useRef("");
@@ -1029,13 +1133,14 @@ export default function App() {
 
   useEffect(() => {
     window.localStorage.setItem("canopy.effects.master", visualEffects.master ? "on" : "off");
+    window.localStorage.setItem(VISUAL_EFFECT_PROFILE_KEY, "1");
     VISUAL_EFFECT_KEYS.forEach((key) => {
       window.localStorage.setItem(`canopy.effects.${key}`, visualEffects[key] ? "on" : "off");
     });
   }, [visualEffects]);
 
   useEffect(() => {
-    window.localStorage.setItem("canopy.life-stream", lifeStreamOpen ? "open" : "closed");
+    window.localStorage.setItem("canopy.fura-notebook", lifeStreamOpen ? "open" : "closed");
   }, [lifeStreamOpen]);
 
   useEffect(() => {
@@ -1189,6 +1294,35 @@ export default function App() {
 
   useEffect(() => {
     if (!snapshot) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const readGuidance = () => void fetchFuraGuidance(locale, controller.signal)
+      .then((response) => {
+        if (!cancelled) setFuraGuidance(response);
+      })
+      .catch((reason) => {
+        if (cancelled || (reason instanceof DOMException && reason.name === "AbortError")) return;
+        setFuraGuidance({
+          schema_version: 1,
+          contract_id: "canopy.living-system.guidance",
+          status: "unavailable",
+          message: null,
+          reason: "guidance_service_unavailable",
+        });
+      });
+    readGuidance();
+    const timer = window.setInterval(() => {
+      if (!document.hidden) readGuidance();
+    }, 15 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [locale, snapshot?.generated_at, snapshotSync.observation_state, snapshotSync.projection_state]);
+
+  useEffect(() => {
+    if (!snapshot) return;
     const latestActivityDate = snapshot.activity?.daily[snapshot.activity.daily.length - 1]?.date ?? "";
     setSelectedActivityDate((current) => snapshot.activity?.daily.some((day) => day.date === current) ? current : latestActivityDate);
     setSelectedModuleId((current) => current && !snapshot.modules.some((module) => module.id === current)
@@ -1313,6 +1447,19 @@ export default function App() {
       })),
     [observationCurrent, snapshot],
   );
+  const displayFuraMessage = useMemo<FuraGuidanceMessage | null>(() => {
+    const message = furaGuidance?.status === "available" ? furaGuidance.message : null;
+    if (!message || message.kind !== "issue") return message;
+    const targetId = message.target?.id;
+    if (!targetId) return message;
+    const issue = snapshot?.issues.find((candidate) => candidate.id === targetId);
+    if (!issue) return message;
+    return {
+      ...message,
+      title: localizedIssueTitle(locale, issue),
+      body: localizedIssueDetail(locale, issue),
+    };
+  }, [furaGuidance, locale, snapshot]);
   const structureNodes = snapshot?.structure?.nodes ?? [];
   const selectedModule = displayModules.find((module) => module.id === selectedModuleId);
   const selectedModuleIssues = selectedModule && observationCurrent
@@ -1333,9 +1480,25 @@ export default function App() {
     clouds: visualEffects.clouds && effectDistance === "far",
   }), [effectDistance, visualEffects]);
   const selectedActivityIndex = activityDays.findIndex((day) => day.date === selectedActivityDate);
-  const growthProgress = activityDays.length
-    ? Math.max(0.72, (selectedActivityIndex + 1) / activityDays.length)
-    : 0;
+  const observedMaturityEvidence = Math.max(
+    lifeStats.total,
+    snapshot?.activity?.events.length ?? 0,
+    activityDays.reduce((total, day) => total + Math.max(0, day.total || 0), 0),
+  );
+  useEffect(() => {
+    if (observedMaturityEvidence <= 0) return;
+    setTreeMaturityEvidence((current) => {
+      const next = Math.max(current, observedMaturityEvidence);
+      if (next !== current) window.localStorage.setItem(TREE_MATURITY_STORAGE_KEY, String(next));
+      return next;
+    });
+  }, [observedMaturityEvidence]);
+  const historicalGrowthRatio = view === "timeline" && activityDays.length
+    ? Math.max(1 / activityDays.length, ((selectedActivityIndex >= 0 ? selectedActivityIndex : activityDays.length - 1) + 1) / activityDays.length)
+    : 1;
+  const currentMaturityScale = 1 + Math.log2(1 + treeMaturityEvidence) / 90;
+  const growthProgress = currentMaturityScale * (0.78 + historicalGrowthRatio * 0.22);
+  const displayedGrowthEvidence = Math.round(treeMaturityEvidence * historicalGrowthRatio);
 
   function enterSeed() {
     setView("seed");
@@ -1446,8 +1609,92 @@ export default function App() {
     if (!lifeStreamOpen) {
       setDetailOpen(false);
       setSettingsOpen(false);
+      setSelectedIssueKey("");
     }
     setLifeStreamOpen(!lifeStreamOpen);
+  }
+
+  function openFuraNotebook() {
+    setDetailOpen(false);
+    setSettingsOpen(false);
+    setSelectedIssueKey("");
+    setLifeStreamOpen(true);
+  }
+
+  function issueFromGuidance(message: FuraGuidanceMessage): CanopyIssue | undefined {
+    if (message.target?.type !== "issue") return undefined;
+    return snapshot?.issues.find((issue) => issue.id === message.target?.id);
+  }
+
+  function inspectFuraGuidance(message: FuraGuidanceMessage) {
+    const issue = issueFromGuidance(message);
+    if (!issue || !observationCurrent) {
+      setSyncNotice(t(locale, "fura.action_unavailable"));
+      return;
+    }
+    const index = snapshot?.issues.indexOf(issue) ?? -1;
+    if (index < 0) return;
+    setLifeStreamOpen(false);
+    setDetailOpen(false);
+    setSettingsOpen(false);
+    setSelectedIssueKey(issueIdentity(issue, index));
+  }
+
+  function diagnoseFuraGuidance(message: FuraGuidanceMessage) {
+    const issue = issueFromGuidance(message);
+    if (!issue || !observationCurrent || issue.remediation?.requestable !== true) {
+      setSyncNotice(t(locale, "fura.action_unavailable"));
+      return;
+    }
+    setSelectedIssueKey("");
+    setTreatmentIssue(issue);
+  }
+
+  async function decideOnFuraGuidance(message: FuraGuidanceMessage, decision: "snooze" | "dismiss") {
+    setFuraBusy(true);
+    setError("");
+    try {
+      await decideFuraGuidance(message.id, {
+        decision,
+        expected_fingerprint: message.fingerprint,
+        ...(decision === "snooze" ? { snooze_hours: 24 } : {}),
+      });
+      const next = await fetchFuraGuidance(locale);
+      setFuraGuidance(next);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t(locale, "fura.action_unavailable"));
+    } finally {
+      setFuraBusy(false);
+    }
+  }
+
+  async function answerFuraQuestion(message: FuraGuidanceMessage, answer: string) {
+    setFuraBusy(true);
+    setError("");
+    try {
+      await answerFuraGuidance(message.id, {
+        answer,
+        expected_fingerprint: message.fingerprint,
+      });
+      const next = await fetchFuraGuidance(locale);
+      setFuraGuidance(next);
+      setSyncNotice(t(locale, "fura.answer_saved"));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t(locale, "fura.action_unavailable"));
+    } finally {
+      setFuraBusy(false);
+    }
+  }
+
+  function openFuraSource(message: FuraGuidanceMessage) {
+    const sourceUrl = message.target?.source_url;
+    try {
+      const parsed = sourceUrl ? new URL(sourceUrl) : null;
+      if (!parsed || parsed.protocol !== "https:") throw new Error("invalid source");
+      window.open(parsed.toString(), "_blank", "noopener,noreferrer");
+    } catch {
+      setSyncNotice(t(locale, "fura.action_unavailable"));
+    }
   }
 
   if (loading && !snapshot) return <LoadingScreen locale={locale} />;
@@ -1473,6 +1720,7 @@ export default function App() {
       data-effect-clouds={appliedVisualEffects.master && appliedVisualEffects.clouds ? "on" : "off"}
       data-effect-glow={appliedVisualEffects.master && appliedVisualEffects.glow ? "on" : "off"}
       data-effect-motion={appliedVisualEffects.master && appliedVisualEffects.motion ? "on" : "off"}
+      data-effect-fura={appliedVisualEffects.master && appliedVisualEffects.fura ? "on" : "off"}
       data-effect-particles-preference={visualEffects.particles ? "on" : "off"}
       data-effect-clouds-preference={visualEffects.clouds ? "on" : "off"}
       data-observation-state={snapshotSync.observation_state}
@@ -1490,6 +1738,9 @@ export default function App() {
         data-architecture-connections={connections.length}
         data-world-tree={backgroundMode === "none" ? "none" : backgroundMode}
         data-ancient-ruins={backgroundMode === "detailed" ? "visible" : "hidden"}
+        data-tree-maturity-evidence={displayedGrowthEvidence}
+        data-tree-maturity-scale={growthProgress.toFixed(4)}
+        data-tree-growth-mode={view === "timeline" ? "historical-preview" : "current"}
       >
         <CanopyScene
           modules={displayModules}
@@ -1506,6 +1757,7 @@ export default function App() {
           focusRevision={focusRevision}
           activeModuleIds={activeModuleIds}
           growthProgress={growthProgress}
+          growthEvidence={displayedGrowthEvidence}
           onSelectModule={focusModule}
           onSelectCard={(cardId) => { setSelectedCardId(cardId); setDetailOpen(true); }}
           onSelectStructure={enterStructure}
@@ -1615,6 +1867,43 @@ export default function App() {
         }}
       />
 
+      <FuraCompanion
+        message={displayFuraMessage}
+        motionEnabled={appliedVisualEffects.master && appliedVisualEffects.fura}
+        notebookOpen={lifeStreamOpen}
+        hidden={view === "timeline" || settingsOpen || lifeStreamOpen || Boolean(selectedIssue) || Boolean(treatmentIssue) || Boolean(treatment)}
+        suspended={detailOpen}
+        rightInset={detailOpen ? 420 : 0}
+        bottomInset={observationCurrent ? undefined : 150}
+        busy={furaBusy}
+        labels={{
+          name: t(locale, "fura.name"),
+          character: t(locale, "fura.aria"),
+          guidance: t(locale, displayFuraMessage?.kind === "question" ? "fura.source.question" : displayFuraMessage?.kind === "daily" ? "fura.source.daily" : "fura.source.core"),
+          expandGuidance: t(locale, "fura.expand_guidance"),
+          collapseGuidance: t(locale, "fura.collapse_guidance"),
+          openNotebook: t(locale, "fura.open_notebook"),
+          dragHint: t(locale, "fura.drag_hint"),
+          inspect: t(locale, "fura.inspect"),
+          diagnose: t(locale, "fura.diagnose"),
+          snooze: t(locale, "fura.snooze"),
+          dismiss: t(locale, "fura.dismiss"),
+          openSource: t(locale, "fura.open_source"),
+          answerLabel: t(locale, "fura.answer_label"),
+          answerBoundary: t(locale, "fura.answer_boundary"),
+          answerPlaceholder: t(locale, "fura.answer_placeholder"),
+          sendAnswer: t(locale, "fura.answer_submit"),
+          sendingAnswer: t(locale, "fura.answer_submit"),
+        }}
+        onOpenNotebook={openFuraNotebook}
+        onInspectReason={inspectFuraGuidance}
+        onStartDiagnosis={diagnoseFuraGuidance}
+        onSnooze={(message) => decideOnFuraGuidance(message, "snooze")}
+        onDismiss={(message) => decideOnFuraGuidance(message, "dismiss")}
+        onOpenSource={openFuraSource}
+        onAnswer={answerFuraQuestion}
+      />
+
       {detailOpen && view === "laboratory" && (
         <LaboratoryPanel
           locale={locale}
@@ -1647,12 +1936,14 @@ export default function App() {
 
       {selectedIssue && <IssueInspector
         issue={selectedIssue}
+        issues={snapshot.issues}
         locale={locale}
         position={selectedIssueIndex}
         count={snapshot.issues.length}
         onPrevious={() => selectAdjacentIssue(-1)}
         onNext={() => selectAdjacentIssue(1)}
-        onTreat={() => setTreatmentIssue(selectedIssue)}
+        onTreat={(issue) => setTreatmentIssue(issue)}
+        onRecheck={() => { void synchronizeLivingSystem(); }}
         onClose={() => setSelectedIssueKey("")}
       />}
 

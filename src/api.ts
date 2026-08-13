@@ -1,5 +1,8 @@
 import type {
   EvolutionLabResponse,
+  FuraGuidanceAnswerResponse,
+  FuraGuidanceDecisionResponse,
+  FuraGuidanceResponse,
   LifeEventsResponse,
   LifeEventsRevisionResponse,
   RemediationCapabilities,
@@ -11,6 +14,7 @@ import type {
   SyncSnapshotResponse,
   TreatmentRequest,
 } from "./types";
+import type { Locale } from "./i18n";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -54,6 +58,35 @@ export function fetchLifeEventRevision(signal?: AbortSignal): Promise<LifeEvents
 
 export function fetchEvolutionLab(): Promise<EvolutionLabResponse> {
   return request("/api/evolution-lab");
+}
+
+export function fetchFuraGuidance(locale: Locale = "zh-TW", signal?: AbortSignal): Promise<FuraGuidanceResponse> {
+  const parameters = new URLSearchParams({ locale });
+  return request(`/api/guidance/current?${parameters.toString()}`, { signal });
+}
+
+export function decideFuraGuidance(
+  guidanceId: string,
+  input: {
+    decision: "snooze" | "dismiss";
+    expected_fingerprint: string;
+    snooze_hours?: number;
+  },
+): Promise<FuraGuidanceDecisionResponse> {
+  return request(`/api/guidance/${encodeURIComponent(guidanceId)}/decision`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function answerFuraGuidance(
+  guidanceId: string,
+  input: { answer: string; expected_fingerprint: string },
+): Promise<FuraGuidanceAnswerResponse> {
+  return request(`/api/guidance/${encodeURIComponent(guidanceId)}/answer`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function fetchRemediationCapabilities(): Promise<RemediationCapabilities> {
